@@ -85,3 +85,15 @@ if __name__ == "__main__":
     while True:
         schedule.run_pending()
         time.sleep(30)
+
+import requests
+
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/services/..."  # Your actual webhook
+test_msg = {
+    "text": "✅ Test message from your job screener. If you're seeing this, Slack is working!"
+}
+
+response = requests.post(SLACK_WEBHOOK_URL, json=test_msg)
+print("Status:", response.status_code)
+print("Slack test response:", response.text)
+
