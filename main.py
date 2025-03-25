@@ -1,3 +1,4 @@
+# === main.py (Updated for GPT-3.5 + Clean Slack Output) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -47,7 +48,7 @@ Reason: [short reason]
     """
     try:
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content
@@ -159,8 +160,8 @@ def main():
 
             logging.info(f"{job['title']} - Scored {score}/10")
 
-            if score >= 1:  # Lowered threshold for debugging
-                msg = f"*📢 {job['title']}*\n<{job['url']}|View job post>\n\n*Score:* {score}/10\n{explanation}"
+            if score >= 0:
+                msg = f"📢 *{job['title']}*\n<{job['url']}|View job post>\n\n*Score:* {score}/10\n{explanation}"
                 send_to_slack(msg)
                 new_seen.add(job["url"])
             else:
