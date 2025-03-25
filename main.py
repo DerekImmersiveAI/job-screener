@@ -1,10 +1,10 @@
-# === main.py ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import openai
 
 load_dotenv()
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
@@ -62,6 +62,7 @@ def send_to_slack(message):
         payload = {"text": message}
         response = requests.post(SLACK_WEBHOOK_URL, json=payload)
         response.raise_for_status()
+        logging.info("✅ Message sent to Slack")
     except Exception as e:
         logging.error(f"Slack error: {e}")
 
@@ -69,7 +70,7 @@ def fetch_remoteok_jobs():
     try:
         response = requests.get("https://remoteok.com/api")
         jobs = response.json()[1:]
-        return [
+        results = [
             {
                 "title": job.get("position"),
                 "description": clean_html(job.get("description", ""))[:1000],
@@ -77,6 +78,8 @@ def fetch_remoteok_jobs():
             }
             for job in jobs if "data" in job.get("position", "").lower()
         ]
+        logging.info(f"RemoteOK returned {len(results)} job(s)")
+        return results
     except Exception as e:
         logging.error(f"RemoteOK error: {e}")
         return []
@@ -84,7 +87,7 @@ def fetch_remoteok_jobs():
 def fetch_ycombinator_jobs():
     try:
         soup = BeautifulSoup(requests.get("https://www.ycombinator.com/jobs").text, "html.parser")
-        return [
+        jobs = [
             {
                 "title": jc.select_one("h2").text.strip(),
                 "description": jc.select_one("p").text.strip() if jc.select_one("p") else "",
@@ -93,6 +96,8 @@ def fetch_ycombinator_jobs():
             for jc in soup.select("a[class*=JobPreview_jobPreview]")
             if "data" in jc.select_one("h2").text.lower() and "intern" not in jc.select_one("h2").text.lower()
         ]
+        logging.info(f"Y Combinator returned {len(jobs)} job(s)")
+        return jobs
     except Exception as e:
         logging.error(f"YC error: {e}")
         return []
@@ -107,6 +112,7 @@ def fetch_google_jobs(query="data scientist", location="remote"):
         }
         response = requests.get("https://serpapi.com/search", params=params)
         jobs = response.json().get("jobs_results", [])
+        logging.info(f"Google Jobs returned {len(jobs)} job(s)")
         return [
             {
                 "title": job["title"],
@@ -122,45 +128,56 @@ def gather_jobs():
     return fetch_remoteok_jobs() + fetch_ycombinator_jobs() + fetch_google_jobs()
 
 def main():
-    seen_jobs = load_seen_jobs()
-    new_seen = set(seen_jobs)
-    jobs = gather_jobs()
-    logging.info(f"Fetched {len(jobs)} job(s)")
+    try:
+        logging.info("--- Running job screener main() ---")
+        logging.info(f"OPENAI key present: {bool(openai.api_key)}")
+        logging.info(f"Slack webhook present: {bool(SLACK_WEBHOOK_URL)}")
+        logging.info(f"SerpAPI key present: {bool(SERPAPI_KEY)}")
 
-    scored_count = 0
-    max_scores_per_day = 5
+        send_to_slack("🚨 Debug: Job screener started!")
 
-    for job in jobs:
-        if job["url"] in seen_jobs:
-            logging.info(f"Skipped (duplicate): {job['title']}")
-            continue
+        seen_jobs = load_seen_jobs()
+        new_seen = set(seen_jobs)
+        jobs = gather_jobs()
+        logging.info(f"Fetched {len(jobs)} total job(s)")
 
-        if scored_count >= max_scores_per_day:
-            logging.info("Reached daily scoring limit (5 jobs)")
-            break
+        scored_count = 0
+        max_scores_per_day = 5
 
-        score, explanation = score_job(job)
-        scored_count += 1
+        for job in jobs:
+            if job["url"] in seen_jobs:
+                logging.info(f"Skipped (duplicate): {job['title']}")
+                continue
 
-        logging.info(f"{job['title']} - Scored {score}/10")
+            if scored_count >= max_scores_per_day:
+                logging.info("Reached daily scoring limit (5 jobs)")
+                break
 
-        if score >= 1:
-            msg = f"*📢 {job['title']}*\n<{job['url']}|View job post>\n\n*Score:* {score}/10\n{explanation}"
-            send_to_slack(msg)
-            new_seen.add(job["url"])
-        else:
-            logging.info(f"Skipped (low score): {job['title']} ({score}/10)")
+            logging.info(f"Scoring job: {job['title']}")
+            score, explanation = score_job(job)
+            scored_count += 1
 
-        time.sleep(2)
+            logging.info(f"{job['title']} - Scored {score}/10")
 
-    save_seen_jobs(new_seen)
+            if score >= 1:  # Lowered threshold for debugging
+                msg = f"*📢 {job['title']}*\n<{job['url']}|View job post>\n\n*Score:* {score}/10\n{explanation}"
+                send_to_slack(msg)
+                new_seen.add(job["url"])
+            else:
+                logging.info(f"Skipped (low score): {job['title']} ({score}/10)")
+
+            time.sleep(2)
+
+        save_seen_jobs(new_seen)
+
+    except Exception as e:
+        logging.error(f"MAIN FUNCTION CRASHED: {e}")
 
 schedule.every().day.at("09:00").do(main)
 
 if __name__ == "__main__":
-    logging.info("Job screener started")
+    logging.info("✅ Job screener started (entrypoint)")
+    main()  # Run once immediately for manual test
     while True:
         schedule.run_pending()
         time.sleep(30)
-
-
