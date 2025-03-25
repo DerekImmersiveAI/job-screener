@@ -67,6 +67,7 @@ def main():
     seen = load_seen()
     new_seen = set(seen)
     for job in gather_jobs():
+    logging.info(f"Fetched {len(jobs)} job(s)")
         if job["url"] in seen: continue
         score, reason = score_job(job)
         if score >= 7:
