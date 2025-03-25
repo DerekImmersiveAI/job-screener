@@ -144,7 +144,7 @@ def main():
 
         logging.info(f"{job['title']} - Scored {score}/10")
 
-        if score >= 7:
+        if score >= 1:
             msg = f"*📢 {job['title']}*\n<{job['url']}|View job post>\n\n*Score:* {score}/10\n{explanation}"
             send_to_slack(msg)
             new_seen.add(job["url"])
