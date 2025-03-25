@@ -1,4 +1,3 @@
-# === main.py (Updated for GPT-3.5 + Clean Slack Output) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -7,7 +6,6 @@ import openai
 load_dotenv()
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
-SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
 CACHE_FILE = "seen_jobs.json"
 
@@ -57,15 +55,6 @@ Reason: [short reason]
     except Exception as e:
         logging.error(f"OpenAI error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
-
-def send_to_slack(message):
-    try:
-        payload = {"text": message}
-        response = requests.post(SLACK_WEBHOOK_URL, json=payload)
-        response.raise_for_status()
-        logging.info("✅ Message sent to Slack")
-    except Exception as e:
-        logging.error(f"Slack error: {e}")
 
 def fetch_remoteok_jobs():
     try:
@@ -130,12 +119,9 @@ def gather_jobs():
 
 def main():
     try:
-        logging.info("--- Running job screener main() ---")
-        logging.info(f"OPENAI key present: {bool(openai.api_key)}")
-        logging.info(f"Slack webhook present: {bool(SLACK_WEBHOOK_URL)}")
+        logging.info("🚀 Job screener starting...")
+        logging.info(f"OpenAI key present: {bool(openai.api_key)}")
         logging.info(f"SerpAPI key present: {bool(SERPAPI_KEY)}")
-
-        send_to_slack("🚨 Debug: Job screener started!")
 
         seen_jobs = load_seen_jobs()
         new_seen = set(seen_jobs)
@@ -151,7 +137,7 @@ def main():
                 continue
 
             if scored_count >= max_scores_per_day:
-                logging.info("Reached daily scoring limit (5 jobs)")
+                logging.info("✅ Reached daily scoring limit (5 jobs)")
                 break
 
             logging.info(f"Scoring job: {job['title']}")
@@ -159,17 +145,14 @@ def main():
             scored_count += 1
 
             logging.info(f"{job['title']} - Scored {score}/10")
+            logging.info(f"{job['url']}")
+            logging.info(f"{explanation}\n")
 
-            if score >= 0:
-                msg = f"📢 *{job['title']}*\n<{job['url']}|View job post>\n\n*Score:* {score}/10\n{explanation}"
-                send_to_slack(msg)
-                new_seen.add(job["url"])
-            else:
-                logging.info(f"Skipped (low score): {job['title']} ({score}/10)")
-
-            time.sleep(2)
+            new_seen.add(job["url"])
+            time.sleep(20)  # Delay to stay under OpenAI RPM limits
 
         save_seen_jobs(new_seen)
+        logging.info("✅ Job screener finished.")
 
     except Exception as e:
         logging.error(f"MAIN FUNCTION CRASHED: {e}")
@@ -177,8 +160,8 @@ def main():
 schedule.every().day.at("09:00").do(main)
 
 if __name__ == "__main__":
-    logging.info("✅ Job screener started (entrypoint)")
-    main()  # Run once immediately for manual test
+    logging.info("📅 Job screener triggered (manual or scheduled)")
+    main()
     while True:
         schedule.run_pending()
         time.sleep(30)
