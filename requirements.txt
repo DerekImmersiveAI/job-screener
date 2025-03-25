@@ -3,4 +3,3 @@ requests
 python-dotenv
 beautifulsoup4
 schedule
-Add requirements.txt with Python dependencies
