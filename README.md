@@ -1,5 +1,3 @@
-# job-screener
-Daily AI-powered job lead screener that posts high-quality roles to Slack.
 # === main.py ===
 import os
 import re
@@ -175,18 +173,6 @@ requests
 python-dotenv
 beautifulsoup4
 schedule
-
-
-# === Dockerfile ===
-FROM python:3.10-slim
-WORKDIR /app
-COPY . /app
-RUN pip install --no-cache-dir -r requirements.txt
-CMD ["python", "main.py"]
-
-git add Dockerfile
-git commit -m "Add Dockerfile"
-git push origin main
 
 
 # === .gitignore ===
