@@ -84,4 +84,3 @@ if __name__ == "__main__":
     while True:
         schedule.run_pending()
         time.sleep(30)
-Add working main.py with full job screener logic
