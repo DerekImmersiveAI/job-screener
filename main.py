@@ -1,4 +1,4 @@
-# === main.py (BrightData Trigger Fix + Airtable Output) ===
+# === main.py (Final: Bright Data CSV Upload + Airtable Integration) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -24,7 +24,8 @@ RELEVANT_ACCOUNTS = [
     "AbbVie", "Intel", "Samsung", "P&G", "Proctor & Gamble", "Disney", "NBCUniversal"
 ]
 
-BRIGHTDATA_SCRAPER_ID = "gd_lpfll7v5hcqtkxl6l"
+BRIGHTDATA_DATASET_ID = "gd_lpfll7v5hcqtkxl6l"
+CSV_PATH = "linkedin_job_urls.csv"
 
 # === Utilities ===
 def extract_score(text):
@@ -44,26 +45,18 @@ def save_seen_jobs(seen):
     with open(CACHE_FILE, "w") as f:
         json.dump(list(seen), f)
 
-# === Bright Data Trigger & Fetch ===
+# === Bright Data Scrape Trigger + Fetch ===
 def trigger_brightdata_scrape():
-    url = f"https://api.brightdata.com/dca/dataset/trigger?dataset_id={BRIGHTDATA_SCRAPER_ID}&include_errors=true"
-    headers = {
-        "Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "input": [
-            {
-                "url": "https://www.linkedin.com/jobs/search/?currentJobId=4158698352&f_C=4680%2C2807%2C13059%2C11098302&geoId=92000000&origin=COMPANY_PAGE_JOBS_CLUSTER_EXPANSION&originToLandingJobPostings=4158698352%2C4187481166%2C4188551209%2C4187885681%2C4181415327%2C4145196287%2C4189087824%2C4184842730%2C4194418834"
-            }
-        ]
-    }
+    url = f"https://api.brightdata.com/datasets/v3/trigger?dataset_id={BRIGHTDATA_DATASET_ID}&include_errors=true"
+    headers = {"Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}"}
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        dataset_id = response.json().get("dataset_id")
-        logging.info(f"Triggered Bright Data scrape. Dataset ID: {dataset_id}")
-        return dataset_id
+        with open(CSV_PATH, 'rb') as f:
+            files = {'data': (CSV_PATH, f)}
+            response = requests.post(url, headers=headers, files=files)
+            response.raise_for_status()
+            dataset_id = response.json().get("dataset_id")
+            logging.info(f"Triggered Bright Data scrape. Dataset ID: {dataset_id}")
+            return dataset_id
     except Exception as e:
         logging.error(f"Failed to trigger Bright Data scrape: {e}")
         return None
