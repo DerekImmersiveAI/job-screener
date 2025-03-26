@@ -1,4 +1,4 @@
-# === main.py (Validated, Cleaned, Final Version) ===
+# === main.py (Final Bright Data JSON-Based Trigger Integration) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -61,7 +61,7 @@ def trigger_brightdata_scrape():
             {"url": "https://www.linkedin.com/jobs/search/?keywords=Spotify"},
             {"url": "https://www.linkedin.com/jobs/search/?keywords=Pfizer"},
             {"url": "https://www.linkedin.com/jobs/search/?keywords=Charter"},
-            {"url": "https://www.linkedin.com/jobs/search/?keywords=CVS%20Health"}
+            {"url": "https://www.linkedin.com/jobs/search/?keywords=CVS Health"}
         ]
     }
     try:
