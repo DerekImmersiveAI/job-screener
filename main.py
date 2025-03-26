@@ -1,4 +1,4 @@
-# === main.py (BrightData Scrape Trigger + Auto Dataset Fetch) ===
+# === main.py (BrightData Trigger Fix + Airtable Output) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -46,7 +46,7 @@ def save_seen_jobs(seen):
 
 # === Bright Data Trigger & Fetch ===
 def trigger_brightdata_scrape():
-    url = f"https://api.brightdata.com/datasets/v3/trigger?dataset_id={BRIGHTDATA_SCRAPER_ID}&include_errors=true"
+    url = f"https://api.brightdata.com/dca/dataset/trigger?dataset_id={BRIGHTDATA_SCRAPER_ID}&include_errors=true"
     headers = {
         "Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}",
         "Content-Type": "application/json"
