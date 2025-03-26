@@ -1,4 +1,4 @@
-# === main.py (Final Version with Inline URL JSON Trigger) ===
+# === main.py (Validated, Cleaned, Final Version) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -17,8 +17,6 @@ AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 CACHE_FILE = "seen_jobs.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-RELEVANT_ACCOUNTS = []  # Replaced with job URLs from input payload
 
 BRIGHTDATA_DATASET_ID = "gd_lpfll7v5hcqtkxl6l"
 
@@ -89,14 +87,13 @@ def fetch_brightdata_jobs(dataset_id):
         for item in data:
             title = item.get("title", "Untitled")
             company = item.get("company", "")
-            if True  # All jobs are considered since URLs already filter for relevance
-                jobs.append({
-                    "title": title,
-                    "company": company,
-                    "description": item.get("description", ""),
-                    "url": item.get("url", "")
-                })
-        logging.info(f"Bright Data returned {len(jobs)} relevant job(s)")
+            jobs.append({
+                "title": title,
+                "company": company,
+                "description": item.get("description", ""),
+                "url": item.get("url", "")
+            })
+        logging.info(f"Bright Data returned {len(jobs)} job(s)")
         return jobs
     except Exception as e:
         logging.error(f"Bright Data fetch error: {e}")
