@@ -1,4 +1,4 @@
-# === main.py (Final: Bright Data CSV Upload + Airtable Integration) ===
+# === main.py (Final Version with Inline URL JSON Trigger) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -18,14 +18,9 @@ CACHE_FILE = "seen_jobs.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-RELEVANT_ACCOUNTS = [
-    "Netflix", "Spotify", "ESPN", "Rockstar Games", "Electronic Arts", "Charter",
-    "T-Mobile", "Kroger", "Allstate", "Meta", "Apple", "CVS", "Pfizer", "Vanguard",
-    "AbbVie", "Intel", "Samsung", "P&G", "Proctor & Gamble", "Disney", "NBCUniversal"
-]
+RELEVANT_ACCOUNTS = []  # Replaced with job URLs from input payload
 
 BRIGHTDATA_DATASET_ID = "gd_lpfll7v5hcqtkxl6l"
-CSV_PATH = "linkedin_job_urls.csv"
 
 # === Utilities ===
 def extract_score(text):
@@ -45,18 +40,38 @@ def save_seen_jobs(seen):
     with open(CACHE_FILE, "w") as f:
         json.dump(list(seen), f)
 
-# === Bright Data Scrape Trigger + Fetch ===
+# === Bright Data Trigger & Fetch ===
 def trigger_brightdata_scrape():
-    url = f"https://api.brightdata.com/datasets/v3/trigger?dataset_id={BRIGHTDATA_DATASET_ID}&include_errors=true"
-    headers = {"Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}"}
+    url = "https://api.brightdata.com/datasets/v3/trigger"
+    headers = {
+        "Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    params = {
+        "dataset_id": BRIGHTDATA_DATASET_ID,
+        "include_errors": "true"
+    }
+    data = {
+        "deliver": {
+            "type": "s3",
+            "filename": {"template": "{[snapshot_id]}", "extension": "csv"},
+            "bucket": "",
+            "directory": ""
+        },
+        "input": [
+            {"url": "https://www.linkedin.com/jobs/search/?keywords=Netflix"},
+            {"url": "https://www.linkedin.com/jobs/search/?keywords=Spotify"},
+            {"url": "https://www.linkedin.com/jobs/search/?keywords=Pfizer"},
+            {"url": "https://www.linkedin.com/jobs/search/?keywords=Charter"},
+            {"url": "https://www.linkedin.com/jobs/search/?keywords=CVS%20Health"}
+        ]
+    }
     try:
-        with open(CSV_PATH, 'rb') as f:
-            files = {'data': (CSV_PATH, f)}
-            response = requests.post(url, headers=headers, files=files)
-            response.raise_for_status()
-            dataset_id = response.json().get("dataset_id")
-            logging.info(f"Triggered Bright Data scrape. Dataset ID: {dataset_id}")
-            return dataset_id
+        response = requests.post(url, headers=headers, params=params, json=data)
+        response.raise_for_status()
+        dataset_id = response.json().get("dataset_id")
+        logging.info(f"Triggered Bright Data scrape. Dataset ID: {dataset_id}")
+        return dataset_id
     except Exception as e:
         logging.error(f"Failed to trigger Bright Data scrape: {e}")
         return None
@@ -74,7 +89,7 @@ def fetch_brightdata_jobs(dataset_id):
         for item in data:
             title = item.get("title", "Untitled")
             company = item.get("company", "")
-            if any(account.lower() in company.lower() for account in RELEVANT_ACCOUNTS):
+            if True  # All jobs are considered since URLs already filter for relevance
                 jobs.append({
                     "title": title,
                     "company": company,
