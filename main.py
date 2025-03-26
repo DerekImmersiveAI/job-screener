@@ -1,12 +1,18 @@
+# === main.py (Airtable-Ready Version, No Slack) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from pyairtable import Table
+from datetime import datetime
 import openai
 
 load_dotenv()
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 CACHE_FILE = "seen_jobs.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -55,6 +61,20 @@ Reason: [short reason]
     except Exception as e:
         logging.error(f"OpenAI error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
+
+def push_to_airtable(job, score, reason):
+    try:
+        table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+        table.create({
+            "Title": job["title"],
+            "URL": job["url"],
+            "Score": score,
+            "Reason": reason,
+            "Date": datetime.utcnow().isoformat()
+        })
+        logging.info(f"✅ Added to Airtable: {job['title']}")
+    except Exception as e:
+        logging.error(f"❌ Airtable error: {e}")
 
 def fetch_remoteok_jobs():
     try:
@@ -148,8 +168,9 @@ def main():
             logging.info(f"{job['url']}")
             logging.info(f"{explanation}\n")
 
+            push_to_airtable(job, score, explanation)
             new_seen.add(job["url"])
-            time.sleep(20)  # Delay to stay under OpenAI RPM limits
+            time.sleep(20)  # Prevent OpenAI rate limit
 
         save_seen_jobs(new_seen)
         logging.info("✅ Job screener finished.")
@@ -163,5 +184,4 @@ if __name__ == "__main__":
     logging.info("📅 Job screener triggered (manual or scheduled)")
     main()
     while True:
-        schedule.run_pending()
-        time.sleep(30)
+        schedule.run_pendi
