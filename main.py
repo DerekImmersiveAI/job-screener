@@ -184,4 +184,4 @@ if __name__ == "__main__":
     logging.info("📅 Job screener triggered (manual or scheduled)")
     main()
     while True:
-        schedule.run_pendi
+        schedule.run_pending( )
