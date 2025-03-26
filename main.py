@@ -1,22 +1,32 @@
-# === main.py (Airtable-Ready Version, No Slack) ===
+# === main.py (Enhanced with Company Name + Clean URL Output) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from pyairtable import Table
+from pyairtable.api import Api
 from datetime import datetime
 import openai
 
+# === Load Environment ===
 load_dotenv()
-
 openai.api_key = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+BRIGHT_DATA_API_TOKEN = os.getenv("BRIGHT_DATA_API_TOKEN")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
+BRIGHT_DATA_DATASET_ID = "hl_7ccd6dac"
 CACHE_FILE = "seen_jobs.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# === Company Filter ===
+RELEVANT_ACCOUNTS = [
+    "Netflix", "Spotify", "ESPN", "Rockstar Games", "Electronic Arts", "Charter",
+    "T-Mobile", "Kroger", "Allstate", "Meta", "Apple", "CVS", "Pfizer", "Vanguard",
+    "AbbVie", "Intel", "Samsung", "P&G", "Proctor & Gamble", "Disney", "NBCUniversal"
+]
+
+# === Utilities ===
 def extract_score(text):
     match = re.search(r"Score:\s*(\d+)/10", text)
     return int(match.group(1)) if match else 0
@@ -34,6 +44,32 @@ def save_seen_jobs(seen):
     with open(CACHE_FILE, "w") as f:
         json.dump(list(seen), f)
 
+# === Bright Data Scraper ===
+def fetch_brightdata_jobs():
+    url = f"https://api.brightdata.com/dca/dataset?id={BRIGHT_DATA_DATASET_ID}"
+    headers = {"Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}"}
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        jobs = []
+        for item in data:
+            title = item.get("title", "Untitled")
+            company = item.get("company", "")
+            if any(account.lower() in company.lower() for account in RELEVANT_ACCOUNTS):
+                jobs.append({
+                    "title": title,
+                    "company": company,
+                    "description": item.get("description", ""),
+                    "url": item.get("url", "")
+                })
+        logging.info(f"Bright Data returned {len(jobs)} relevant job(s)")
+        return jobs
+    except Exception as e:
+        logging.error(f"Bright Data error: {e}")
+        return []
+
+# === Scoring via OpenAI ===
 def score_job(job):
     prompt = f"""
 You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
@@ -44,6 +80,7 @@ You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
 Here’s the job:
 
 Title: {job['title']}
+Company: {job.get('company', 'Unknown')}
 Description: {job['description']}
 
 Respond in this format:
@@ -62,87 +99,30 @@ Reason: [short reason]
         logging.error(f"OpenAI error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
+# === Airtable Output ===
 def push_to_airtable(job, score, reason):
     try:
-        table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+        table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         table.create({
             "Title": job["title"],
+            "Company": job.get("company", "Unknown"),
             "URL": job["url"],
             "Score": score,
             "Reason": reason,
-            "Date": datetime.utcnow().isoformat()
+            "Date": datetime.utcnow().date().isoformat()
         })
-        logging.info(f"✅ Added to Airtable: {job['title']}")
+        logging.info(f"✅ Added to Airtable: {job['title']} at {job.get('company', 'Unknown')}")
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-def fetch_remoteok_jobs():
-    try:
-        response = requests.get("https://remoteok.com/api")
-        jobs = response.json()[1:]
-        results = [
-            {
-                "title": job.get("position"),
-                "description": clean_html(job.get("description", ""))[:1000],
-                "url": f"https://remoteok.com{job.get('url')}"
-            }
-            for job in jobs if "data" in job.get("position", "").lower()
-        ]
-        logging.info(f"RemoteOK returned {len(results)} job(s)")
-        return results
-    except Exception as e:
-        logging.error(f"RemoteOK error: {e}")
-        return []
-
-def fetch_ycombinator_jobs():
-    try:
-        soup = BeautifulSoup(requests.get("https://www.ycombinator.com/jobs").text, "html.parser")
-        jobs = [
-            {
-                "title": jc.select_one("h2").text.strip(),
-                "description": jc.select_one("p").text.strip() if jc.select_one("p") else "",
-                "url": f"https://www.ycombinator.com{jc['href']}"
-            }
-            for jc in soup.select("a[class*=JobPreview_jobPreview]")
-            if "data" in jc.select_one("h2").text.lower() and "intern" not in jc.select_one("h2").text.lower()
-        ]
-        logging.info(f"Y Combinator returned {len(jobs)} job(s)")
-        return jobs
-    except Exception as e:
-        logging.error(f"YC error: {e}")
-        return []
-
-def fetch_google_jobs(query="data scientist", location="remote"):
-    try:
-        params = {
-            "engine": "google_jobs",
-            "q": f"{query} {location}",
-            "hl": "en",
-            "api_key": SERPAPI_KEY
-        }
-        response = requests.get("https://serpapi.com/search", params=params)
-        jobs = response.json().get("jobs_results", [])
-        logging.info(f"Google Jobs returned {len(jobs)} job(s)")
-        return [
-            {
-                "title": job["title"],
-                "description": job["description"],
-                "url": job.get("related_links", [{}])[0].get("link", "")
-            } for job in jobs
-        ]
-    except Exception as e:
-        logging.error(f"Google Jobs error: {e}")
-        return []
-
+# === Job Gatherer ===
 def gather_jobs():
-    return fetch_remoteok_jobs() + fetch_ycombinator_jobs() + fetch_google_jobs()
+    return fetch_brightdata_jobs()
 
+# === Main Runner ===
 def main():
     try:
         logging.info("🚀 Job screener starting...")
-        logging.info(f"OpenAI key present: {bool(openai.api_key)}")
-        logging.info(f"SerpAPI key present: {bool(SERPAPI_KEY)}")
-
         seen_jobs = load_seen_jobs()
         new_seen = set(seen_jobs)
         jobs = gather_jobs()
@@ -160,7 +140,7 @@ def main():
                 logging.info("✅ Reached daily scoring limit (5 jobs)")
                 break
 
-            logging.info(f"Scoring job: {job['title']}")
+            logging.info(f"Scoring job: {job['title']} at {job.get('company', 'Unknown')}")
             score, explanation = score_job(job)
             scored_count += 1
 
@@ -170,11 +150,10 @@ def main():
 
             push_to_airtable(job, score, explanation)
             new_seen.add(job["url"])
-            time.sleep(20)  # Prevent OpenAI rate limit
+            time.sleep(20)
 
         save_seen_jobs(new_seen)
         logging.info("✅ Job screener finished.")
-
     except Exception as e:
         logging.error(f"MAIN FUNCTION CRASHED: {e}")
 
@@ -184,4 +163,5 @@ if __name__ == "__main__":
     logging.info("📅 Job screener triggered (manual or scheduled)")
     main()
     while True:
-        schedule.run_pending( )
+        schedule.run_pending()
+        time.sleep(30)
