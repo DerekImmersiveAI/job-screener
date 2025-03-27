@@ -1,4 +1,0 @@
-import requests
-
-url = "https://hooks.slack.com/services/..."  # your actual webhook
-requests.post(url, json={"text": "✅ Slack webhook test successful!"})
