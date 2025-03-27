@@ -1,4 +1,4 @@
-# === main.py (Final Bright Data JSON-Based Trigger Integration) ===
+# === main.py (Bright Data Full JSON URL List Trigger) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -49,6 +49,10 @@ def trigger_brightdata_scrape():
         "dataset_id": BRIGHTDATA_DATASET_ID,
         "include_errors": "true"
     }
+
+    with open("brightdata_input.json") as f:
+        input_data = json.load(f)
+
     data = {
         "deliver": {
             "type": "s3",
@@ -56,14 +60,9 @@ def trigger_brightdata_scrape():
             "bucket": "",
             "directory": ""
         },
-        "input": [
-            {"url": "https://www.linkedin.com/jobs/search/?keywords=Netflix"},
-            {"url": "https://www.linkedin.com/jobs/search/?keywords=Spotify"},
-            {"url": "https://www.linkedin.com/jobs/search/?keywords=Pfizer"},
-            {"url": "https://www.linkedin.com/jobs/search/?keywords=Charter"},
-            {"url": "https://www.linkedin.com/jobs/search/?keywords=CVS Health"}
-        ]
+        "input": input_data
     }
+
     try:
         response = requests.post(url, headers=headers, params=params, json=data)
         response.raise_for_status()
