@@ -1,4 +1,4 @@
-# === main.py (Single CVS URL for Bright Data Scrape) ===
+# === main.py (Updated with Valid Bright Data Token) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -10,7 +10,7 @@ import openai
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-BRIGHT_DATA_API_TOKEN = os.getenv("BRIGHT_DATA_API_TOKEN")
+BRIGHT_DATA_API_TOKEN = "acf45c69910db98c0f8dacff6152ca9018a26e070933f34172965add703e808d"
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
