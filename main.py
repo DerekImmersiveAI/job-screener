@@ -1,4 +1,4 @@
-# === main.py (Updated with Valid Bright Data Token) ===
+# === main.py (Back to working version without Bright Data) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -10,15 +10,12 @@ import openai
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
-BRIGHT_DATA_API_TOKEN = "acf45c69910db98c0f8dacff6152ca9018a26e070933f34172965add703e808d"
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 CACHE_FILE = "seen_jobs.json"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-BRIGHTDATA_DATASET_ID = "gd_lpfll7v5hcqtkxl6l"
 
 # === Utilities ===
 def extract_score(text):
@@ -38,65 +35,26 @@ def save_seen_jobs(seen):
     with open(CACHE_FILE, "w") as f:
         json.dump(list(seen), f)
 
-# === Bright Data Trigger & Fetch ===
-def trigger_brightdata_scrape():
-    url = "https://api.brightdata.com/datasets/v3/trigger"
-    headers = {
-        "Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    params = {
-        "dataset_id": BRIGHTDATA_DATASET_ID,
-        "include_errors": "true"
-    }
-    data = {
-        "deliver": {
-            "type": "s3",
-            "filename": {"template": "{[snapshot_id]}", "extension": "json"},
-            "bucket": "",
-            "directory": ""
-        },
-        "input": [
-            {
-                "url": "https://www.linkedin.com/jobs/search/?currentJobId=4158698352&f_C=4680&geoId=92000000&origin=JOB_SEARCH_PAGE_JOB_FILTER&sortBy=R&spellCorrectionEnabled=true"
-            }
-        ]
-    }
+# === RemoteOK Example ===
+def fetch_remoteok_jobs():
     try:
-        response = requests.post(url, headers=headers, params=params, json=data)
-        response.raise_for_status()
-        dataset_id = response.json().get("dataset_id")
-        logging.info(f"Triggered Bright Data scrape. Dataset ID: {dataset_id}")
-        return dataset_id
-    except Exception as e:
-        logging.error(f"Failed to trigger Bright Data scrape: {e}")
-        return None
-
-def fetch_brightdata_jobs(dataset_id):
-    url = f"https://api.brightdata.com/dca/dataset?id={dataset_id}"
-    headers = {"Authorization": f"Bearer {BRIGHT_DATA_API_TOKEN}"}
-    try:
-        logging.info("Waiting 60 seconds for Bright Data job to complete...")
-        time.sleep(60)
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        jobs = []
-        for item in data:
-            title = item.get("title", "Untitled")
-            company = item.get("company", "")
-            jobs.append({
-                "title": title,
-                "company": company,
-                "description": item.get("description", ""),
-                "url": item.get("url", "")
+        response = requests.get("https://remoteok.com/api")
+        jobs = response.json()[1:]  # First item is metadata
+        results = []
+        for job in jobs:
+            results.append({
+                "title": job.get("position"),
+                "company": job.get("company"),
+                "description": clean_html(job.get("description", "")),
+                "url": f"https://remoteok.com{job.get('url')}"
             })
-        logging.info(f"Bright Data returned {len(jobs)} job(s)")
-        return jobs
+        logging.info(f"RemoteOK returned {len(results)} job(s)")
+        return results
     except Exception as e:
-        logging.error(f"Bright Data fetch error: {e}")
+        logging.error(f"RemoteOK error: {e}")
         return []
 
+# === Scoring and Output ===
 def score_job(job):
     prompt = f"""
 You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
@@ -142,10 +100,7 @@ def push_to_airtable(job, score, reason):
         logging.error(f"❌ Airtable error: {e}")
 
 def gather_jobs():
-    dataset_id = trigger_brightdata_scrape()
-    if dataset_id:
-        return fetch_brightdata_jobs(dataset_id)
-    return []
+    return fetch_remoteok_jobs()  # Extend here with other job sources if needed
 
 def main():
     try:
@@ -156,7 +111,7 @@ def main():
         logging.info(f"Fetched {len(jobs)} total job(s)")
 
         scored_count = 0
-        max_scores_per_day = 5
+        max_scores_per_day = 20
 
         for job in jobs:
             if job["url"] in seen_jobs:
@@ -164,7 +119,7 @@ def main():
                 continue
 
             if scored_count >= max_scores_per_day:
-                logging.info("✅ Reached daily scoring limit (5 jobs)")
+                logging.info("✅ Reached daily scoring limit (20 jobs)")
                 break
 
             logging.info(f"Scoring job: {job['title']} at {job.get('company', 'Unknown')}")
