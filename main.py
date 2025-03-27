@@ -1,4 +1,4 @@
-# === main.py (Bright Data Full JSON URL List Trigger) ===
+# === main.py (Single CVS URL for Bright Data Scrape) ===
 import os, json, time, logging, re, requests, schedule
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -49,20 +49,19 @@ def trigger_brightdata_scrape():
         "dataset_id": BRIGHTDATA_DATASET_ID,
         "include_errors": "true"
     }
-
-    with open("brightdata_input.json") as f:
-        input_data = json.load(f)
-
     data = {
         "deliver": {
             "type": "s3",
-            "filename": {"template": "{[snapshot_id]}", "extension": "csv"},
+            "filename": {"template": "{[snapshot_id]}", "extension": "json"},
             "bucket": "",
             "directory": ""
         },
-        "input": input_data
+        "input": [
+            {
+                "url": "https://www.linkedin.com/jobs/search/?currentJobId=4158698352&f_C=4680&geoId=92000000&origin=JOB_SEARCH_PAGE_JOB_FILTER&sortBy=R&spellCorrectionEnabled=true"
+            }
+        ]
     }
-
     try:
         response = requests.post(url, headers=headers, params=params, json=data)
         response.raise_for_status()
