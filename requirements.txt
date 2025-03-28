@@ -1,6 +1,7 @@
-openai==0.28
+boto3
 requests
+openai
+schedule
 python-dotenv
 beautifulsoup4
-schedule
 pyairtable
