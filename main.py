@@ -1,9 +1,9 @@
-# === main.py (Bright Data Trigger → S3 → GPT → Airtable) ===
+# === main.py (Bright Data → S3 Polling → GPT → Airtable) ===
 import os, json, time, logging, re, requests, schedule, boto3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from pyairtable.api import Api
-from datetime import datetime
+from datetime import datetime, timedelta
 import openai
 
 # === Load Environment ===
@@ -60,21 +60,28 @@ def trigger_brightdata_scrape():
         logging.error(f"❌ Bright Data trigger failed: {e}")
         return False
 
-# === S3 Downloader ===
-def download_latest_s3_file(bucket_name, prefix="linkedin/json/"):
+# === S3 Downloader with Long Polling ===
+def download_latest_s3_file(bucket_name, prefix="linkedin/json/", timeout_minutes=90):
     s3 = boto3.client("s3", aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
-    try:
+    logging.info("⏳ Waiting for Bright Data file in S3...")
+    deadline = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+
+    while datetime.utcnow() < deadline:
         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
         all_files = response.get("Contents", [])
-        latest = max(all_files, key=lambda x: x["LastModified"])
-        key = latest["Key"]
-        file_path = "latest_scrape.json"
-        s3.download_file(bucket_name, key, file_path)
-        logging.info(f"✅ Downloaded {key} to {file_path}")
-        return file_path
-    except Exception as e:
-        logging.error(f"❌ S3 download error: {e}")
-        return None
+        if all_files:
+            latest = max(all_files, key=lambda x: x["LastModified"])
+            key = latest["Key"]
+            file_path = "latest_scrape.json"
+            s3.download_file(bucket_name, key, file_path)
+            logging.info(f"✅ Downloaded {key} to {file_path}")
+            return file_path
+
+        logging.info("🔄 No file yet. Retrying in 60 seconds...")
+        time.sleep(60)
+
+    logging.error("❌ Timeout: No file appeared in S3 within the wait window.")
+    return None
 
 # === Load + Clean JSON Jobs ===
 def load_jobs_from_json(file_path):
@@ -156,7 +163,7 @@ def main():
 
         seen_jobs = set()
         if os.path.exists(CACHE_FILE):
-            seen_jobs = load_seen_jobs()
+            seen_jobs = json.load(open(CACHE_FILE))
         new_seen = set(seen_jobs)
 
         jobs = load_jobs_from_json(file_path)
@@ -186,7 +193,8 @@ def main():
             new_seen.add(job["url"])
             time.sleep(20)
 
-        save_seen_jobs(new_seen)
+        with open(CACHE_FILE, "w") as f:
+            json.dump(list(new_seen), f)
         logging.info("✅ Job screener finished.")
     except Exception as e:
         logging.error(f"MAIN FUNCTION CRASHED: {e}")
