@@ -1,6 +1,6 @@
 boto3
 requests
-openai
+openai>=1.2.4
 schedule
 python-dotenv
 beautifulsoup4
