@@ -144,7 +144,6 @@ def push_to_airtable(job, score, reason):
             "Location": job.get("job_location", ""),
             "Description": job.get("job_summary", ""),
             "URL": job.get("url", ""),
-            "employment_type": job.get("job_employment_type", ""),
             "Score": score,
             "Reason": reason,
             "Date": datetime.utcnow().date().isoformat()
