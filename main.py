@@ -1,4 +1,4 @@
-# === main.py (Bright Data → S3 Polling → GPT → Airtable) ===
+# === main.py (One-Company Bright Data → S3 → GPT → Airtable) ===
 import os, json, time, logging, re, requests, schedule, boto3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
@@ -31,8 +31,7 @@ def trigger_brightdata_scrape():
         "dataset_id": "gd_lpfll7v5hcqtkxl6l",
         "include_errors": "true",
         "type": "discover_new",
-        "discover_by": "url",
-        "limit_per_input": "100"
+        "discover_by": "url"
     }
     data = {
         "deliver": {
@@ -43,11 +42,11 @@ def trigger_brightdata_scrape():
                 "aws-access-key": AWS_ACCESS_KEY_ID,
                 "aws-secret-key": AWS_SECRET_ACCESS_KEY
             },
-            "directory": "linkedin/json/"
+            "directory": ""
         },
         "input": [
             {
-                "url": "https://www.linkedin.com/jobs/search/?currentJobId=4192793413&f_C=..."
+                "url": "https://www.linkedin.com/jobs/search/?currentJobId=4188551209&f_C=4680&f_TPR=r604800&geoId=103644278&origin=JOB_SEARCH_PAGE_JOB_FILTER&refresh=true"
             }
         ]
     }
@@ -61,7 +60,7 @@ def trigger_brightdata_scrape():
         return False
 
 # === S3 Downloader with Long Polling ===
-def download_latest_s3_file(bucket_name, prefix="linkedin/json/", timeout_minutes=90):
+def download_latest_s3_file(bucket_name, prefix="", timeout_minutes=90):
     s3 = boto3.client("s3", aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
     logging.info("⏳ Waiting for Bright Data file in S3...")
     deadline = datetime.utcnow() + timedelta(minutes=timeout_minutes)
