@@ -1,14 +1,15 @@
-# === main.py (One-Company Bright Data → S3 → GPT → Airtable) ===
+# === main.py (Bright Data → S3 → GPT v1 → Airtable) ===
 import os, json, time, logging, re, requests, schedule, boto3
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from pyairtable.api import Api
 from datetime import datetime, timedelta
-import openai
+from openai import OpenAI
+
+client = OpenAI()
 
 # === Load Environment ===
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
@@ -123,11 +124,12 @@ Score: X/10
 Reason: [short reason]
     """
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content
+        print("🔎 GPT response:", content)
         score = extract_score(content)
         return score, content
     except Exception as e:
