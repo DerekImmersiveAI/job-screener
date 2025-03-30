@@ -140,14 +140,19 @@ def push_to_airtable(job, score, reason):
     try:
         table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         table.create({
-            "Title": job["title"],
-            "Company": job.get("company", "Unknown"),
-            "URL": job["url"],
+            "Title": job.get("job_title", "Untitled"),
+            "Company": job.get("company_name", "Unknown"),
+            "Location": job.get("job_location", ""),
+            "Description": job.get("job_summary", ""),
+            "URL": job.get("url", ""),
+            "posted_at": job.get("job_posted_date", ""),
+            "seniority_level": job.get("job_seniority_level", ""),
+            "employment_type": job.get("job_employment_type", ""),
             "Score": score,
             "Reason": reason,
             "Date": datetime.utcnow().date().isoformat()
         })
-        logging.info(f"✅ Added to Airtable: {job['title']} at {job.get('company', 'Unknown')}")
+        logging.info(f"✅ Added to Airtable: {job.get('job_title', 'Untitled')} at {job.get('company_name', 'Unknown')}")
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
