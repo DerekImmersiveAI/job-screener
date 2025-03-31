@@ -134,6 +134,8 @@ Reason: [short reason]
 
 # === Validate Date ===
 def is_valid_date(value):
+    if not value or not isinstance(value, str) or not value.strip():
+        return False
     try:
         parse_date(value)
         return True
@@ -155,7 +157,7 @@ def push_to_airtable(job, score, reason):
             "Date": datetime.utcnow().date().isoformat()
         }
         posted_at = job.get("job_posted_date")
-        if posted_at and is_valid_date(posted_at):
+        if is_valid_date(posted_at):
             fields["job_posted_date"] = posted_at
 
         table.create(fields)
