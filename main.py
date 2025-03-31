@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from pyairtable.api import Api
 from openai import OpenAI
 import boto3
-from dateutil.parser import parse as parse_date
 
 # === Load Environment ===
 load_dotenv()
@@ -132,16 +131,6 @@ Reason: [short reason]
         logging.error(f"❌ OpenAI error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
-# === Validate Date ===
-def is_valid_date(value):
-    if not value or not isinstance(value, str) or not value.strip():
-        return False
-    try:
-        parse_date(value)
-        return True
-    except:
-        return False
-
 # === Push to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
@@ -156,9 +145,6 @@ def push_to_airtable(job, score, reason):
             "Reason": reason,
             "Date": datetime.utcnow().date().isoformat()
         }
-        posted_at = job.get("job_posted_date")
-        if is_valid_date(posted_at):
-            fields["job_posted_date"] = posted_at
 
         table.create(fields)
         logging.info(f"✅ Added to Airtable: {fields['title']} at {fields['company_name']}")
