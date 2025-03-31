@@ -1,4 +1,4 @@
-import os, json, time, logging, re, requests, csv, schedule
+import os, csv, time, logging, re, requests, schedule
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pyairtable.api import Api
@@ -15,11 +15,10 @@ AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 openai_client = OpenAI()
-CACHE_FILE = "seen_jobs.csv"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Bright Data Trigger ===
+# === Trigger Bright Data Job ===
 def trigger_brightdata_scrape():
     url = "https://api.brightdata.com/datasets/v3/trigger"
     headers = {
@@ -44,7 +43,9 @@ def trigger_brightdata_scrape():
             "directory": ""
         },
         "input": [
-            {"url": "https://www.linkedin.com/jobs/search/?currentJobId=4168640988&f_C=4680&geoId=103644278"}
+            {
+                "url": "https://www.linkedin.com/jobs/search/?currentJobId=4168640988&f_C=4680&geoId=103644278"
+            }
         ]
     }
 
@@ -57,7 +58,7 @@ def trigger_brightdata_scrape():
         logging.error(f"❌ Bright Data trigger failed: {e}")
         return False
 
-# === Download CSV from S3 ===
+# === Download Latest S3 CSV ===
 def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
     s3 = boto3.client(
         "s3",
@@ -84,7 +85,17 @@ def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
     logging.error("❌ Timeout: No CSV appeared in S3.")
     return None
 
-# === GPT Scoring ===
+# === Load CSV Jobs ===
+def load_jobs_from_csv(file_path):
+    jobs = []
+    with open(file_path, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            jobs.append(row)
+    logging.info(f"📥 Loaded {len(jobs)} jobs from CSV")
+    return jobs
+
+# === Scoring Logic ===
 def extract_score(text):
     match = re.search(r"Score:\s*(\d+)/10", text)
     return int(match.group(1)) if match else 0
@@ -92,16 +103,16 @@ def extract_score(text):
 def score_job(job):
     prompt = f"""
 You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
-- Relevance to 'Data Science'
+- Role relevance to 'Data Science'
 - Seniority (prefer senior roles)
 - Remote-friendly
 - Salary (prefer $140k+)
 
 Job:
-Title: {job['title']}
-Company: {job['company_name']}
-Location: {job['job_location']}
-Description: {job['job_summary']}
+Title: {job.get('job_title', 'Untitled')}
+Company: {job.get('company_name', 'Unknown')}
+Location: {job.get('job_location', '')}
+Description: {job.get('job_summary', '')}
 
 Respond in this format:
 Score: X/10
@@ -114,19 +125,19 @@ Reason: [short reason]
         )
         content = response.choices[0].message.content
         score = extract_score(content)
-        logging.info(f"🔍 GPT scored {job['title']} at {job['company_name']}: {score}/10")
+        logging.info(f"🧠 GPT score: {score}/10")
         return score, content
     except Exception as e:
-        logging.error(f"OpenAI error: {e}")
+        logging.error(f"❌ OpenAI error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
-# === Airtable Output ===
+# === Push to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
         table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         fields = {
-            "title": job.get("title", ""),
-            "company_name": job.get("company_name", ""),
+            "title": job.get("job_title", "Untitled"),
+            "company_name": job.get("company_name", "Unknown"),
             "job_location": job.get("job_location", ""),
             "job_summary": job.get("job_summary", ""),
             "url": job.get("url", ""),
@@ -142,27 +153,17 @@ def push_to_airtable(job, score, reason):
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === CSV Parser ===
-def load_jobs_from_csv(file_path):
-    jobs = []
-    with open(file_path, newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            jobs.append(row)
-    logging.info(f"📥 Loaded {len(jobs)} jobs from CSV")
-    return jobs
-
-# === Main Runner ===
+# === Main ===
 def main():
     logging.info("🚀 Starting job screener...")
 
     if not trigger_brightdata_scrape():
-        logging.error("❌ Could not trigger Bright Data scrape. Exiting.")
+        logging.error("❌ Could not trigger Bright Data scrape.")
         return
 
     csv_file = download_latest_s3_csv(S3_BUCKET_NAME)
     if not csv_file:
-        logging.error("❌ Could not download CSV from S3. Exiting.")
+        logging.error("❌ Failed to download CSV from S3.")
         return
 
     jobs = load_jobs_from_csv(csv_file)
@@ -172,9 +173,9 @@ def main():
             push_to_airtable(job, score, reason)
         time.sleep(20)
 
-    logging.info("✅ All done.")
+    logging.info("✅ Job screener completed.")
 
-# === Schedule ===
+# === Scheduler ===
 schedule.every().day.at("09:00").do(main)
 
 if __name__ == "__main__":
