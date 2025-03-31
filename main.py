@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from pyairtable.api import Api
 from openai import OpenAI
 import boto3
+from dateutil.parser import parse as parse_date
 
 # === Load Environment ===
 load_dotenv()
@@ -95,7 +96,7 @@ def load_jobs_from_csv(file_path):
     logging.info(f"📥 Loaded {len(jobs)} jobs from CSV")
     return jobs
 
-# === Scoring Logic ===
+# === Score with GPT ===
 def extract_score(text):
     match = re.search(r"Score:\s*(\d+)/10", text)
     return int(match.group(1)) if match else 0
@@ -131,6 +132,14 @@ Reason: [short reason]
         logging.error(f"❌ OpenAI error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
+# === Validate Date ===
+def is_valid_date(value):
+    try:
+        parse_date(value)
+        return True
+    except:
+        return False
+
 # === Push to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
@@ -145,8 +154,9 @@ def push_to_airtable(job, score, reason):
             "Reason": reason,
             "Date": datetime.utcnow().date().isoformat()
         }
-        if job.get("job_posted_date"):
-            fields["job_posted_date"] = job["job_posted_date"]
+        posted_at = job.get("job_posted_date")
+        if posted_at and is_valid_date(posted_at):
+            fields["job_posted_date"] = posted_at
 
         table.create(fields)
         logging.info(f"✅ Added to Airtable: {fields['title']} at {fields['company_name']}")
