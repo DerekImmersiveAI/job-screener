@@ -143,7 +143,6 @@ def push_to_airtable(job, score, reason):
             "url": job.get("url", ""),
             "Score": score,
             "Reason": reason,
-            "Date": datetime.utcnow().date().isoformat()
         }
 
         table.create(fields)
