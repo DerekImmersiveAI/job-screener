@@ -1,15 +1,15 @@
-import os, csv, time, logging, re, schedule
+import os, json, time, logging, re, schedule
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pyairtable.api import Api
 from openai import OpenAI
 import boto3
 
-# === Load Environment Variables ===
+# === Load environment variables ===
 load_dotenv()
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")  # e.g. "job-screener"
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
@@ -17,44 +17,41 @@ openai_client = OpenAI()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Download Latest CSV from S3 ===
-def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
+# === Download latest JSON file from S3 ===
+def download_latest_s3_json(bucket_name, prefix="", timeout_minutes=90):
     s3 = boto3.client(
         "s3",
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY
     )
-    logging.info("⏳ Waiting for CSV file in S3...")
+    logging.info("⏳ Waiting for JSON file in S3...")
     deadline = datetime.utcnow() + timedelta(minutes=timeout_minutes)
 
     while datetime.utcnow() < deadline:
         response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
         contents = response.get("Contents", [])
-        csv_files = [f for f in contents if f["Key"].endswith(".csv")]
-        if csv_files:
-            latest = max(csv_files, key=lambda x: x["LastModified"])
+        json_files = [f for f in contents if f["Key"].endswith(".json")]
+        if json_files:
+            latest = max(json_files, key=lambda x: x["LastModified"])
             key = latest["Key"]
-            path = "brightdata_latest.csv"
+            path = "brightdata_latest.json"
             s3.download_file(bucket_name, key, path)
             logging.info(f"✅ Downloaded {key} to {path}")
             return path
         logging.info("🔄 No file yet. Retrying in 60s...")
         time.sleep(60)
 
-    logging.error("❌ Timeout: No CSV appeared in S3.")
+    logging.error("❌ Timeout: No JSON file appeared in S3.")
     return None
 
-# === Load CSV Data ===
-def load_jobs_from_csv(file_path):
-    jobs = []
-    with open(file_path, newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            jobs.append(row)
-    logging.info(f"📥 Loaded {len(jobs)} jobs from CSV")
+# === Load jobs from downloaded JSON ===
+def load_jobs_from_json(file_path):
+    with open(file_path, "r", encoding="utf-8") as f:
+        jobs = json.load(f)
+    logging.info(f"📥 Loaded {len(jobs)} jobs from JSON")
     return jobs
 
-# === GPT Scoring ===
+# === GPT scoring logic ===
 def extract_score(text):
     match = re.search(r"Score:\s*(\d+)/10", text)
     return int(match.group(1)) if match else 0
@@ -89,7 +86,7 @@ Reason: [short reason]
         logging.error(f"❌ GPT error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
-# === Push to Airtable ===
+# === Push high scorers to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
         table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
@@ -107,16 +104,16 @@ def push_to_airtable(job, score, reason):
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main Process ===
+# === Main job flow ===
 def main():
     logging.info("🚀 Starting job screener...")
 
-    csv_file = download_latest_s3_csv(S3_BUCKET_NAME)
-    if not csv_file:
-        logging.error("❌ No CSV file found in S3.")
+    json_file = download_latest_s3_json(S3_BUCKET_NAME)
+    if not json_file:
+        logging.error("❌ No JSON file found in S3.")
         return
 
-    jobs = load_jobs_from_csv(csv_file)
+    jobs = load_jobs_from_json(json_file)
     for job in jobs:
         score, reason = score_job(job)
         if score >= 7:
@@ -125,7 +122,7 @@ def main():
 
     logging.info("✅ Job screener completed.")
 
-# === Schedule Daily Run ===
+# === Schedule daily run ===
 schedule.every().day.at("09:00").do(main)
 
 if __name__ == "__main__":
