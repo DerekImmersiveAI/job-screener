@@ -5,11 +5,11 @@ from pyairtable.api import Api
 from openai import OpenAI
 import boto3
 
-# === Load Env Vars ===
+# === Load Environment Variables ===
 load_dotenv()
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")  # Example: "job-screener"
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")  # e.g. "job-screener"
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
@@ -17,7 +17,7 @@ openai_client = OpenAI()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Download Most Recent S3 CSV ===
+# === Download Latest CSV from S3 ===
 def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
     s3 = boto3.client(
         "s3",
@@ -44,7 +44,7 @@ def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
     logging.error("❌ Timeout: No CSV appeared in S3.")
     return None
 
-# === Load Jobs from CSV ===
+# === Load CSV Data ===
 def load_jobs_from_csv(file_path):
     jobs = []
     with open(file_path, newline='', encoding='utf-8') as f:
@@ -86,7 +86,7 @@ Reason: [short reason]
         logging.info(f"🧠 GPT score: {score}/10")
         return score, content
     except Exception as e:
-        logging.error(f"GPT error: {e}")
+        logging.error(f"❌ GPT error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
 # === Push to Airtable ===
@@ -100,15 +100,14 @@ def push_to_airtable(job, score, reason):
             "job_summary": job.get("job_summary", ""),
             "url": job.get("url", ""),
             "Score": score,
-            "Reason": reason,
-            "Date": datetime.utcnow().date().isoformat()
+            "Reason": reason
         }
         table.create(fields)
         logging.info(f"✅ Added to Airtable: {fields['title']} at {fields['company_name']}")
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main ===
+# === Main Process ===
 def main():
     logging.info("🚀 Starting job screener...")
 
@@ -126,7 +125,7 @@ def main():
 
     logging.info("✅ Job screener completed.")
 
-# === Schedule ===
+# === Schedule Daily Run ===
 schedule.every().day.at("09:00").do(main)
 
 if __name__ == "__main__":
