@@ -1,16 +1,15 @@
-import os, csv, time, logging, re, requests, schedule
+import os, csv, time, logging, re, schedule
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pyairtable.api import Api
 from openai import OpenAI
 import boto3
 
-# === Load Environment Variables ===
+# === Load Env Vars ===
 load_dotenv()
-BRIGHTDATA_API_TOKEN = os.getenv("BRIGHTDATA_API_TOKEN")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-S3_BUCKET_NAME = "job-screener"
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")  # Example: "job-screener"
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
@@ -18,48 +17,14 @@ openai_client = OpenAI()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Trigger Bright Data Scrape ===
-def trigger_brightdata_scrape():
-    url = "https://api.brightdata.com/datasets/v3/trigger"
-    headers = {
-        "Authorization": f"Bearer {BRIGHTDATA_API_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    params = {
-        "dataset_id": "gd_lpfll7v5hcqtkxl6l",
-        "include_errors": "true",
-        "type": "discover_new",
-        "discover_by": "url",
-    }
-    data = {
-        "deliver": {
-            "type": "s3",
-            "filename": {"template": "{[snapshot_id]}", "extension": "json"},
-            "bucket": S3_BUCKET_NAME,
-            "credentials": {
-                "aws-access-key": AWS_ACCESS_KEY_ID,
-                "aws-secret-key": AWS_SECRET_ACCESS_KEY,
-            },
-            "directory": ""
-        },
-        "input": [{
-            "url": "https://www.linkedin.com/jobs/search/?currentJobId=4186424621&f_C=1304385&f_TPR=r604800&keywords=AbbVie&origin=JOB_SEARCH_PAGE_JOB_FILTER&spellCorrectionEnabled=true"
-        }]
-    }
-
-    try:
-        response = requests.post(url, headers=headers, params=params, json=data)
-        response.raise_for_status()
-        logging.info(f"✅ Bright Data scrape triggered: {response.json()}")
-        return True
-    except Exception as e:
-        logging.error(f"❌ Bright Data trigger failed: {e}")
-        return False
-
-# === Download Latest Bright Data CSV from S3 ===
+# === Download Most Recent S3 CSV ===
 def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
-    s3 = boto3.client("s3", aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
-    logging.info("⏳ Waiting for Bright Data file in S3...")
+    s3 = boto3.client(
+        "s3",
+        aws_access_key_id=AWS_ACCESS_KEY_ID,
+        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
+    )
+    logging.info("⏳ Waiting for CSV file in S3...")
     deadline = datetime.utcnow() + timedelta(minutes=timeout_minutes)
 
     while datetime.utcnow() < deadline:
@@ -76,10 +41,10 @@ def download_latest_s3_csv(bucket_name, prefix="", timeout_minutes=90):
         logging.info("🔄 No file yet. Retrying in 60s...")
         time.sleep(60)
 
-    logging.error("❌ Timeout: No file appeared in S3.")
+    logging.error("❌ Timeout: No CSV appeared in S3.")
     return None
 
-# === Load CSV ===
+# === Load Jobs from CSV ===
 def load_jobs_from_csv(file_path):
     jobs = []
     with open(file_path, newline='', encoding='utf-8') as f:
@@ -124,7 +89,7 @@ Reason: [short reason]
         logging.error(f"GPT error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
-# === Airtable Output ===
+# === Push to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
         table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
@@ -143,17 +108,13 @@ def push_to_airtable(job, score, reason):
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main Flow ===
+# === Main ===
 def main():
     logging.info("🚀 Starting job screener...")
 
-    if not trigger_brightdata_scrape():
-        logging.error("❌ Could not trigger Bright Data scrape.")
-        return
-
     csv_file = download_latest_s3_csv(S3_BUCKET_NAME)
     if not csv_file:
-        logging.error("❌ Failed to download CSV from S3.")
+        logging.error("❌ No CSV file found in S3.")
         return
 
     jobs = load_jobs_from_csv(csv_file)
