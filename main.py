@@ -96,7 +96,6 @@ def push_to_airtable(job, score, reason):
             "company_name": job.get("company_name", ""),
             "job_location": job.get("job_location", ""),
             "job_summary": job.get("job_summary", ""),
-            "apply_link": job.get("apply_link", ""),
             "job_seniority_level": job.get("job_seniority_level", ""),
             "job_function": job.get("job_function", ""),
             "job_employment_type": job.get("job_employment_type", ""),
