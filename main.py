@@ -51,7 +51,7 @@ def load_jobs_from_json(file_path):
     logging.info(f"📥 Loaded {len(jobs)} jobs from JSON")
     return jobs
 
-# === GPT scoring logic ===
+# === GPT scoring ===
 def extract_score(text):
     match = re.search(r"Score:\s*(\d+)/10", text)
     return int(match.group(1)) if match else 0
@@ -94,7 +94,6 @@ def push_to_airtable(job, score, reason):
             "url": job.get("url", ""),
             "job_title": job.get("job_title", ""),
             "company_name": job.get("company_name", ""),
-            "company_id": job.get("company_id", ""),
             "job_location": job.get("job_location", ""),
             "job_summary": job.get("job_summary", ""),
             "apply_link": job.get("apply_link", ""),
@@ -118,7 +117,7 @@ def push_to_airtable(job, score, reason):
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main execution ===
+# === Main ===
 def main():
     logging.info("🚀 Starting job screener...")
 
@@ -136,7 +135,7 @@ def main():
 
     logging.info("✅ Job screener completed.")
 
-# === Schedule daily run ===
+# === Schedule ===
 schedule.every().day.at("09:00").do(main)
 
 if __name__ == "__main__":
