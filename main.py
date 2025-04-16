@@ -17,7 +17,7 @@ openai_client = OpenAI()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Download latest JSON file from S3 ===
+# === Download latest JSON from S3 ===
 def download_latest_s3_json(bucket_name, prefix="", timeout_minutes=90):
     s3 = boto3.client(
         "s3",
@@ -51,7 +51,7 @@ def load_jobs_from_json(file_path):
     logging.info(f"📥 Loaded {len(jobs)} jobs from JSON")
     return jobs
 
-# === GPT scoring ===
+# === GPT scoring logic ===
 def extract_score(text):
     match = re.search(r"Score:\s*(\d+)/10", text)
     return int(match.group(1)) if match else 0
@@ -118,7 +118,7 @@ def push_to_airtable(job, score, reason):
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main job flow ===
+# === Main execution ===
 def main():
     logging.info("🚀 Starting job screener...")
 
