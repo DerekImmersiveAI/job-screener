@@ -86,13 +86,12 @@ Reason: [short reason]
         logging.error(f"❌ GPT error: {e}")
         return 0, "Score: 0/10\nReason: Error in scoring."
 
-# === Push to Airtable with full field mapping ===
+# === Push to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
         table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         fields = {
             "url": job.get("url", ""),
-            "job_posting_id": job.get("job_posting_id", ""),
             "job_title": job.get("job_title", ""),
             "company_name": job.get("company_name", ""),
             "company_id": job.get("company_id", ""),
@@ -119,7 +118,7 @@ def push_to_airtable(job, score, reason):
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main execution ===
+# === Main job flow ===
 def main():
     logging.info("🚀 Starting job screener...")
 
