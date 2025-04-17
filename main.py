@@ -1,71 +1,93 @@
-import os, json, time, logging, re, requests, schedule
-import boto3
+import os
+import openai
+from openai import OpenAI
 from dotenv import load_dotenv
 from pyairtable import Table
 from datetime import datetime
+import json
+import logging
+import time
+import re
+import boto3
 
-# === Load environment variables ===
+# Load environment
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+openai.api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=openai.api_key)
+
+AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
 AWS_BUCKET_NAME = os.getenv("AWS_BUCKET_NAME")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def extract_score(text):
-    if not text:
-        return 0
-    match = re.search(r"Score:\s*(\d+)/10", text)
-    return int(match.group(1)) if match else 0
-
-def fetch_latest_json_from_s3():
+def download_latest_file_from_s3():
     try:
-        s3 = boto3.client("s3",
-            aws_access_key_id=AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-        )
+        s3 = boto3.client("s3", aws_access_key_id=AWS_ACCESS_KEY, aws_secret_access_key=AWS_SECRET_KEY)
         response = s3.list_objects_v2(Bucket=AWS_BUCKET_NAME)
-        files = [obj["Key"] for obj in response.get("Contents", []) if obj["Key"].endswith(".json")]
-        latest_file = max(files, key=lambda x: s3.head_object(Bucket=AWS_BUCKET_NAME, Key=x)["LastModified"])
+        files = response.get("Contents", [])
+        if not files:
+            raise Exception("❌ No files found in S3 bucket.")
+        latest_file = max(files, key=lambda x: x["LastModified"])["Key"]
         logging.info(f"📥 Downloaded {latest_file} to brightdata_latest.json")
         s3.download_file(Bucket=AWS_BUCKET_NAME, Key=latest_file, Filename="brightdata_latest.json")
+        return "brightdata_latest.json"
     except Exception as e:
         logging.error(f"S3 download error: {e}")
         raise
 
-def score_job(job):
+def load_jobs(filepath):
     try:
-        import openai
-        openai.api_key = OPENAI_API_KEY
+        with open(filepath, "r") as f:
+            jobs = json.load(f)
+        logging.info(f"📂 Loaded {len(jobs)} jobs from JSON")
+        return jobs
+    except Exception as e:
+        logging.error(f"Error loading JSON: {e}")
+        return []
 
-        content = f"""You are a job matching assistant. Rate the relevance of the following job to a senior data scientist profile on a scale from 1 to 10.
-Job Title: {job['job_title']}
-Company: {job['company_name']}
-Location: {job['job_location']}
-Summary: {job['job_summary']}
+def extract_score(text):
+    match = re.search(r"Score:\s*(\d+)/10", text)
+    return int(match.group(1)) if match else 0
+
+def score_job(job):
+    prompt = f"""
+You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
+- Role relevance to 'Data Science'
+- Seniority (prefer senior roles)
+- Remote work option
+- Salary (prefer $140k+)
+
+Here’s the job:
+
+Title: {job.get('job_title', 'Untitled')}
+Company: {job.get('company_name', 'Unknown')}
+Location: {job.get('job_location', 'Unknown')}
+Description: {job.get('job_summary', 'No description')}
 
 Respond in this format:
 Score: X/10
-Reason: [why this score]
-"""
-        response = openai.ChatCompletion.create(
+Reason: [short reason]
+    """
+    try:
+        response = client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": content}]
+            messages=[{"role": "user", "content": prompt}]
         )
-        explanation = response.choices[0].message.content
-        score = extract_score(explanation)
-        return score, explanation
+        content = response.choices[0].message.content
+        score = extract_score(content)
+        logging.info(f"🧠 GPT score: {score}/10")
+        return score, content
     except Exception as e:
         logging.error(f"OpenAI error: {e}")
-        return 0, None
+        return 0, "Score: 0/10\nReason: Error in scoring."
 
 def push_to_airtable(job, score, reason):
     try:
-        table = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+        table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         fields = {
             "job_title": job.get("job_title"),
             "company_name": job.get("company_name"),
@@ -84,36 +106,18 @@ def push_to_airtable(job, score, reason):
             "Reason": reason,
         }
         table.create(fields)
-        logging.info(f"✅ Added to Airtable: {job['job_title']} at {job['company_name']}")
+        logging.info(f"✅ Added to Airtable: {job.get('job_title')} at {job.get('company_name')}")
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
 def main():
-    try:
-        logging.info("🚀 Starting job screener...")
-        fetch_latest_json_from_s3()
-
-        with open("brightdata_latest.json") as f:
-            job_data = json.load(f)
-
-        jobs = job_data if isinstance(job_data, list) else job_data.get("data", [])
-        logging.info(f"📊 Loaded {len(jobs)} jobs from JSON")
-
-        for job in jobs:
-            score, reason = score_job(job)
-            logging.info(f"🧠 GPT score: {score}/10")
-            if reason:
-                push_to_airtable(job, score, reason)
-            time.sleep(1.5)
-
-    except Exception as e:
-        logging.error(f"❌ Job screener failed: {e}")
-
-schedule.every().day.at("09:00").do(main)
+    logging.info("🚀 Starting job screener...")
+    filepath = download_latest_file_from_s3()
+    jobs = load_jobs(filepath)
+    for job in jobs:
+        score, reason = score_job(job)
+        push_to_airtable(job, score, reason)
+        time.sleep(2)
 
 if __name__ == "__main__":
-    logging.info("🏃 Running 'python main.py'")
     main()
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
