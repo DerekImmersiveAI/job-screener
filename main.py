@@ -2,94 +2,89 @@ import os
 import json
 import time
 import logging
+import re
 import requests
-import openai
-import pandas as pd
 import boto3
 from datetime import datetime
 from pyairtable import Table
 from dotenv import load_dotenv
+import openai
 
-# === Load environment variables ===
+# === Load Environment Variables ===
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
-S3_BUCKET = os.getenv("S3_BUCKET")
-AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
-AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
-REGION_NAME = os.getenv("REGION_NAME", "us-east-1")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 
-# === Logging setup ===
+openai.api_key = OPENAI_API_KEY
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Helper functions ===
-def get_latest_json_file_from_s3(bucket, prefix=""):
-    s3 = boto3.client("s3", aws_access_key_id=AWS_ACCESS_KEY,
-                      aws_secret_access_key=AWS_SECRET_KEY,
-                      region_name=REGION_NAME)
-    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
-    if "Contents" not in response:
-        raise FileNotFoundError("No files found in S3 bucket.")
-    latest_file = max(response["Contents"], key=lambda x: x["LastModified"])
-    logging.info(f"📥 Downloaded {latest_file['Key']} from S3")
-    s3.download_file(bucket, latest_file["Key"], "brightdata_latest.json")
-    return "brightdata_latest.json"
-
-def load_jobs_from_json(path):
-    with open(path, "r") as f:
-        data = json.load(f)
-    if isinstance(data, dict) and "result" in data:
-        return data["result"]
-    return data
+# === Utility Functions ===
+def extract_score(text):
+    match = re.search(r"Score:\s*(\d+)/10", text)
+    return int(match.group(1)) if match else 0
 
 def score_job(job):
     prompt = f"""
-You are an AI assistant helping screen job listings for data science relevance. Score the job from 1–10 based on:
-
-- Relevance to Data Science
+You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
+- Relevance to data science
 - Seniority (prefer senior roles)
-- Salary (prefer $140k+)
 - Remote flexibility
+- Salary ($140k+ preferred)
 
-Job Title: {job.get("job_title", "")}
-Company: {job.get("company_name", "")}
-Location: {job.get("location", "")}
-Description: {job.get("job_summary", "")}
+Job Details:
+Title: {job.get("job_title", "N/A")}
+Company: {job.get("company_name", "N/A")}
+Location: {job.get("job_location", "N/A")}
+Summary: {job.get("job_summary", "N/A")}
+Description: {job.get("job_description", "N/A")}
 
 Respond in this format:
 Score: X/10
-Reason: [short reason]
-"""
+Reason: [short explanation]
+    """
     try:
         response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}]
         )
-        content = response.choices[0].message.content
-        score_line = next((line for line in content.splitlines() if "Score:" in line), "Score: 0/10")
-        reason_line = next((line for line in content.splitlines() if "Reason:" in line), "Reason: Not specified.")
-        score = int(score_line.split(":")[1].strip().split("/")[0])
-        reason = reason_line.split(":", 1)[1].strip()
-        return score, reason
+        message = response.choices[0].message.content.strip()
+        score = extract_score(message)
+        return score, message
     except Exception as e:
-        logging.error(f"Error in scoring: {e}")
-        return 0, "Error in scoring."
+        logging.error(f"OpenAI error: {e}")
+        return 0, "Score: 0/10\nReason: Error in scoring."
+
+def get_latest_json_from_s3():
+    s3 = boto3.client("s3")
+    try:
+        files = s3.list_objects_v2(Bucket=S3_BUCKET_NAME).get("Contents", [])
+        json_files = [f for f in files if f["Key"].endswith(".json")]
+        latest_file = max(json_files, key=lambda x: x["LastModified"])
+        s3.download_file(S3_BUCKET_NAME, latest_file["Key"], "brightdata_latest.json")
+        logging.info(f"✅ Downloaded {latest_file['Key']} to brightdata_latest.json")
+        return "brightdata_latest.json"
+    except Exception as e:
+        logging.error(f"S3 download error: {e}")
+        return None
 
 def push_to_airtable(job, score, reason):
     try:
         table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         fields = {
-            "job_title": job.get("job_title", ""),
-            "company_name": job.get("company_name", ""),
-            "location": job.get("location", ""),
-            "job_summary": job.get("job_summary", ""),
+            "job_title": job.get("job_title"),
+            "company_name": job.get("company_name"),
+            "job_location": job.get("job_location"),
+            "job_description": job.get("job_description"),
+            "job_summary": job.get("job_summary"),
+            "job_link": job.get("job_link"),
+            "job_industries": job.get("job_industries"),
             "Score": score,
             "Reason": reason,
-            "URL": job.get("job_url", ""),
-            "job_type": job.get("job_type", ""),
-            "job_industries": job.get("job_industries", "")
+            "Date": datetime.utcnow().strftime("%Y-%m-%d")
         }
         table.create(fields)
         logging.info(f"✅ Added to Airtable: {fields['job_title']} at {fields['company_name']}")
@@ -97,19 +92,21 @@ def push_to_airtable(job, score, reason):
         logging.error(f"❌ Airtable error: {e}")
 
 def main():
-    try:
-        logging.info("🚀 Starting job screener...")
-        file_path = get_latest_json_file_from_s3(S3_BUCKET)
-        jobs = load_jobs_from_json(file_path)
-        logging.info(f"📄 Loaded {len(jobs)} jobs from JSON")
+    logging.info("🚀 Starting job screener...")
+    file_path = get_latest_json_from_s3()
+    if not file_path:
+        return
 
-        for job in jobs:
-            score, reason = score_job(job)
-            logging.info(f"🧠 GPT score: {score}/10")
-            push_to_airtable(job, score, reason)
-            time.sleep(1)
-    except Exception as e:
-        logging.error(f"MAIN ERROR: {e}")
+    with open(file_path, "r") as f:
+        jobs = json.load(f)
+
+    logging.info(f"📥 Loaded {len(jobs)} jobs from JSON")
+
+    for job in jobs:
+        score, reason = score_job(job)
+        logging.info(f"🧠 GPT score: {score}/10")
+        push_to_airtable(job, score, reason)
+        time.sleep(1)  # Rate limiting
 
 if __name__ == "__main__":
     main()
