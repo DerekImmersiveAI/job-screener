@@ -120,9 +120,12 @@ def main():
             }
 
             # Handle job_poster with length validation
-            poster = job.get("job_poster")
-            if isinstance(poster, str) and len(poster.strip()) > 0 and len(poster.strip()) <= 255:
-                fields["job_poster"] = poster.strip()
+           poster = job.get("job_poster")
+if isinstance(poster, str):
+    poster = poster.strip()
+    if 0 < len(poster) <= 255:
+        fields["job_poster"] = poster
+
 
             # Only include valid dates for 'job_posted_date'
             posted_date = job.get("job_posted_date")
