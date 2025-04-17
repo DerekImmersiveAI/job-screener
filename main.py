@@ -3,13 +3,14 @@ import json
 import logging
 import time
 import boto3
-import openai
 import pandas as pd
-from pyairtable import Table
 from datetime import datetime
+from pyairtable import Table
+from openai import OpenAI  # Correct OpenAI import
+
+client = OpenAI()  # Proper initialization
 
 # === Load config from environment ===
-openai.api_key = os.getenv("OPENAI_API_KEY")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
@@ -87,6 +88,7 @@ def push_to_airtable(job, score, reason):
             "Reason": reason,
         }
 
+        # Only include job_poster if valid length (Airtable 255 char limit)
         poster = job.get("job_poster")
         if isinstance(poster, str) and len(poster.strip()) > 0 and len(poster.strip()) <= 255:
             fields["job_poster"] = poster.strip()
@@ -97,7 +99,7 @@ def push_to_airtable(job, score, reason):
         logging.error(f"❌ Airtable error: {e}")
 
 def main():
-    logging.info("🏃 Starting job screener...")
+    logging.info("🚀 Starting job screener...")
     filepath = fetch_latest_json_from_s3()
     if not filepath:
         logging.error("🚨 Job screener failed: no file retrieved from S3.")
