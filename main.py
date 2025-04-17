@@ -1,140 +1,115 @@
-import os, json, time, logging, re, schedule
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
-from pyairtable.api import Api
-from openai import OpenAI
+import os
+import json
+import time
+import logging
+import requests
+import openai
+import pandas as pd
 import boto3
+from datetime import datetime
+from pyairtable import Table
+from dotenv import load_dotenv
 
 # === Load environment variables ===
 load_dotenv()
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+openai.api_key = os.getenv("OPENAI_API_KEY")
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
-openai_client = OpenAI()
+S3_BUCKET = os.getenv("S3_BUCKET")
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_KEY")
+REGION_NAME = os.getenv("REGION_NAME", "us-east-1")
 
+# === Logging setup ===
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# === Download latest JSON from S3 ===
-def download_latest_s3_json(bucket_name, prefix="", timeout_minutes=90):
-    s3 = boto3.client(
-        "s3",
-        aws_access_key_id=AWS_ACCESS_KEY_ID,
-        aws_secret_access_key=AWS_SECRET_ACCESS_KEY
-    )
-    logging.info("⏳ Waiting for JSON file in S3...")
-    deadline = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+# === Helper functions ===
+def get_latest_json_file_from_s3(bucket, prefix=""):
+    s3 = boto3.client("s3", aws_access_key_id=AWS_ACCESS_KEY,
+                      aws_secret_access_key=AWS_SECRET_KEY,
+                      region_name=REGION_NAME)
+    response = s3.list_objects_v2(Bucket=bucket, Prefix=prefix)
+    if "Contents" not in response:
+        raise FileNotFoundError("No files found in S3 bucket.")
+    latest_file = max(response["Contents"], key=lambda x: x["LastModified"])
+    logging.info(f"📥 Downloaded {latest_file['Key']} from S3")
+    s3.download_file(bucket, latest_file["Key"], "brightdata_latest.json")
+    return "brightdata_latest.json"
 
-    while datetime.utcnow() < deadline:
-        response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-        contents = response.get("Contents", [])
-        json_files = [f for f in contents if f["Key"].endswith(".json")]
-        if json_files:
-            latest = max(json_files, key=lambda x: x["LastModified"])
-            key = latest["Key"]
-            path = "brightdata_latest.json"
-            s3.download_file(bucket_name, key, path)
-            logging.info(f"✅ Downloaded {key} to {path}")
-            return path
-        logging.info("🔄 No file yet. Retrying in 60s...")
-        time.sleep(60)
-
-    logging.error("❌ Timeout: No JSON file appeared in S3.")
-    return None
-
-# === Load jobs from JSON ===
-def load_jobs_from_json(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        jobs = json.load(f)
-    logging.info(f"📥 Loaded {len(jobs)} jobs from JSON")
-    return jobs
-
-# === GPT scoring ===
-def extract_score(text):
-    match = re.search(r"Score:\s*(\d+)/10", text)
-    return int(match.group(1)) if match else 0
+def load_jobs_from_json(path):
+    with open(path, "r") as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "result" in data:
+        return data["result"]
+    return data
 
 def score_job(job):
     prompt = f"""
-You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
+You are an AI assistant helping screen job listings for data science relevance. Score the job from 1–10 based on:
+
 - Relevance to Data Science
 - Seniority (prefer senior roles)
-- Remote-friendly
-- Salary ($140k+)
+- Salary (prefer $140k+)
+- Remote flexibility
 
-Title: {job.get('job_title', 'Untitled')}
-Company: {job.get('company_name', 'Unknown')}
-Location: {job.get('job_location', '')}
-Description: {job.get('job_summary', '')}
+Job Title: {job.get("job_title", "")}
+Company: {job.get("company_name", "")}
+Location: {job.get("location", "")}
+Description: {job.get("job_summary", "")}
 
 Respond in this format:
 Score: X/10
 Reason: [short reason]
 """
     try:
-        response = openai_client.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content
-        score = extract_score(content)
-        logging.info(f"🧠 GPT score: {score}/10")
-        return score, content
+        score_line = next((line for line in content.splitlines() if "Score:" in line), "Score: 0/10")
+        reason_line = next((line for line in content.splitlines() if "Reason:" in line), "Reason: Not specified.")
+        score = int(score_line.split(":")[1].strip().split("/")[0])
+        reason = reason_line.split(":", 1)[1].strip()
+        return score, reason
     except Exception as e:
-        logging.error(f"❌ GPT error: {e}")
-        return 0, "Score: 0/10\nReason: Error in scoring."
+        logging.error(f"Error in scoring: {e}")
+        return 0, "Error in scoring."
 
-# === Push to Airtable ===
 def push_to_airtable(job, score, reason):
     try:
-        table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+        table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
         fields = {
-            "url": job.get("url", ""),
             "job_title": job.get("job_title", ""),
             "company_name": job.get("company_name", ""),
-            "job_location": job.get("job_location", ""),
+            "location": job.get("location", ""),
             "job_summary": job.get("job_summary", ""),
-            "job_industries": job.get("job_industries", ""),
-            "job_base_pay_range": job.get("job_base_pay_range", ""),
-            "company_url": job.get("company_url", ""),
-            "job_posted_time": job.get("job_posted_time", ""),
-            "job_num_applicants": job.get("job_num_applicants", ""),
-            "job_posted_date": job.get("job_posted_date", ""),
-            "job_poster": job.get("job_poster", ""),
-            "base_salary": job.get("base_salary", ""),
             "Score": score,
-            "Reason": reason
+            "Reason": reason,
+            "URL": job.get("job_url", ""),
+            "job_type": job.get("job_type", ""),
+            "job_industries": job.get("job_industries", "")
         }
         table.create(fields)
         logging.info(f"✅ Added to Airtable: {fields['job_title']} at {fields['company_name']}")
     except Exception as e:
         logging.error(f"❌ Airtable error: {e}")
 
-# === Main ===
 def main():
-    logging.info("🚀 Starting job screener...")
+    try:
+        logging.info("🚀 Starting job screener...")
+        file_path = get_latest_json_file_from_s3(S3_BUCKET)
+        jobs = load_jobs_from_json(file_path)
+        logging.info(f"📄 Loaded {len(jobs)} jobs from JSON")
 
-    json_file = download_latest_s3_json(S3_BUCKET_NAME)
-    if not json_file:
-        logging.error("❌ No JSON file found in S3.")
-        return
-
-    jobs = load_jobs_from_json(json_file)
-    for job in jobs:
-        score, reason = score_job(job)
-        if score >= 7:
+        for job in jobs:
+            score, reason = score_job(job)
+            logging.info(f"🧠 GPT score: {score}/10")
             push_to_airtable(job, score, reason)
-        time.sleep(20)
-
-    logging.info("✅ Job screener completed.")
-
-# === Schedule ===
-schedule.every().day.at("09:00").do(main)
+            time.sleep(1)
+    except Exception as e:
+        logging.error(f"MAIN ERROR: {e}")
 
 if __name__ == "__main__":
     main()
-    while True:
-        schedule.run_pending()
-        time.sleep(30)
