@@ -57,7 +57,7 @@ Score: X/10
 Reason: [short reason]
     """
     try:
-        response = openai.ChatCompletion.create(
+        response = client.chat.completions.create(
             model="gpt-4",
             messages=[{"role": "user", "content": prompt}]
         )
