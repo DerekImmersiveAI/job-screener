@@ -5,3 +5,4 @@ schedule
 python-dotenv
 beautifulsoup4
 pyairtable
+pandas
