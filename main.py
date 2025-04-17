@@ -71,7 +71,6 @@ def push_to_airtable(job, score, reason):
             "url": job.get("url"),
             "job_posted_time": job.get("job_posted_time"),
             "job_num_applicants": job.get("job_num_applicants"),
-            "job_posted_date": job.get("job_posted_date"),
             "job_poster": job.get("job_poster", {}).get("name"),
             "base_salary": job.get("base_salary", {}).get("min_amount"),
             "Score": score,
