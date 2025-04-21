@@ -3,12 +3,8 @@ import json
 import logging
 import time
 import boto3
-import pandas as pd
 from datetime import datetime
 from pyairtable import Table
-from openai import OpenAI  # Correct OpenAI import
-
-client = OpenAI()  # Proper initialization
 
 # === Load config from environment ===
 AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
@@ -39,36 +35,48 @@ def fetch_latest_json_from_s3():
         return None
 
 def score_job(job):
-    prompt = f"""
-You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
-- Role relevance to 'Data Science'
-- Seniority (prefer senior roles)
-- Remote work option
-- Salary (prefer $140k+)
-
-Job Title: {job.get("job_title")}
-Company: {job.get("company_name")}
-Summary: {job.get("job_summary")}
-Location: {job.get("job_location")}
-Salary: {job.get("base_salary")}
-Description: {job.get("job_description")}
-
-Respond in this format:
-Score: X/10
-Reason: [short reason]
-    """
     try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        content = response.choices[0].message.content.strip()
-        score_line = next((line for line in content.splitlines() if "Score" in line), "Score: 0/10")
-        score = int(score_line.split(":")[1].split("/")[0].strip())
-        return score, content
+        posted_time = job.get("job_posted_time")
+        poster = job.get("job_poster")
+        salary_str = str(job.get("base_salary", "")).replace(",", "").replace("$", "")
+        try:
+            salary = int("".join(filter(str.isdigit, salary_str)))
+        except ValueError:
+            salary = 0
+
+        days_since_posted = 999
+        if posted_time:
+            try:
+                post_date = datetime.strptime(posted_time, "%Y-%m-%dT%H:%M:%S.%fZ")
+                days_since_posted = (datetime.utcnow() - post_date).days
+            except Exception:
+                pass
+
+        score = 0
+        reasons = []
+
+        if days_since_posted <= 7:
+            score += 4
+            reasons.append("Job posted recently")
+        else:
+            reasons.append("Job is older than 7 days")
+
+        if poster and isinstance(poster, str) and len(poster.strip()) > 0:
+            score += 3
+            reasons.append("Has job poster listed")
+        else:
+            reasons.append("Missing job poster")
+
+        if salary >= 140000:
+            score += 3
+            reasons.append("Salary above $140k")
+        else:
+            reasons.append("Salary below $140k or unspecified")
+
+        return score, "Reason: " + "; ".join(reasons)
     except Exception as e:
-        logging.error(f"OpenAI error: {e}")
-        return 0, f"Score: 0/10\nReason: OpenAI error: {e}"
+        logging.error(f"Scoring error: {e}")
+        return 0, f"Reason: Error in scoring: {e}"
 
 def push_to_airtable(job, score, reason):
     try:
@@ -88,7 +96,6 @@ def push_to_airtable(job, score, reason):
             "Reason": reason,
         }
 
-        # Only include job_poster if valid length (Airtable 255 char limit)
         poster = job.get("job_poster")
         if isinstance(poster, str) and len(poster.strip()) > 0 and len(poster.strip()) <= 255:
             fields["job_poster"] = poster.strip()
@@ -102,7 +109,7 @@ def main():
     logging.info("🚀 Starting job screener...")
     filepath = fetch_latest_json_from_s3()
     if not filepath:
-        logging.error("🚨 Job screener failed: no file retrieved from S3.")
+        logging.error("❌ Job screener failed: no file retrieved from S3.")
         return
 
     with open(filepath, "r") as f:
@@ -115,7 +122,7 @@ def main():
 
     for job in jobs:
         score, reason = score_job(job)
-        logging.info(f"🧠 GPT score: {score}/10")
+        logging.info(f"🧠 Score: {score}/10")
         push_to_airtable(job, score, reason)
         time.sleep(1)
 
