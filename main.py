@@ -1,5 +1,5 @@
 import os
-import json
+import csv
 import logging
 import time
 import boto3
@@ -16,7 +16,7 @@ AWS_BUCKET = os.getenv("AWS_BUCKET_NAME")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def fetch_latest_json_from_s3():
+def fetch_latest_csv_from_s3():
     try:
         s3 = boto3.client(
             "s3",
@@ -25,11 +25,11 @@ def fetch_latest_json_from_s3():
         )
         response = s3.list_objects_v2(Bucket=AWS_BUCKET)
         files = response.get("Contents", [])
-        json_files = [f for f in files if f["Key"].endswith(".json")]
-        latest = max(json_files, key=lambda f: f["LastModified"])
-        logging.info(f"📥 Downloaded {latest['Key']} to brightdata_latest.json")
-        s3.download_file(AWS_BUCKET, latest["Key"], "brightdata_latest.json")
-        return "brightdata_latest.json"
+        csv_files = [f for f in files if f["Key"].endswith(".csv")]
+        latest = max(csv_files, key=lambda f: f["LastModified"])
+        logging.info(f"📥 Downloaded {latest['Key']} to brightdata_latest.csv")
+        s3.download_file(AWS_BUCKET, latest["Key"], "brightdata_latest.csv")
+        return "brightdata_latest.csv"
     except Exception as e:
         logging.error(f"S3 download error: {e}")
         return None
@@ -107,18 +107,16 @@ def push_to_airtable(job, score, reason):
 
 def main():
     logging.info("🚀 Starting job screener...")
-    filepath = fetch_latest_json_from_s3()
+    filepath = fetch_latest_csv_from_s3()
     if not filepath:
         logging.error("❌ Job screener failed: no file retrieved from S3.")
         return
 
-    with open(filepath, "r") as f:
-        jobs = json.load(f)
+    with open(filepath, newline='', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        jobs = list(reader)
 
-    if isinstance(jobs, dict) and "data" in jobs:
-        jobs = jobs["data"]
-
-    logging.info(f"📊 Loaded {len(jobs)} jobs from JSON")
+    logging.info(f"📊 Loaded {len(jobs)} jobs from CSV")
 
     for job in jobs:
         score, reason = score_job(job)
