@@ -6,6 +6,11 @@ from typing import List, Dict, Any
 
 import boto3, requests, backoff
 
+import os, pprint, sys
+pprint.pprint({k: v for k, v in os.environ.items() if "AIRTABLE" in k})
+sys.exit(0)
+
+
 # ────────── logging ──────────
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
