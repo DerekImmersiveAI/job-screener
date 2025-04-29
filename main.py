@@ -1,159 +1,149 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-main.py – cron-entry for Render.
-Scrapes / loads raw jobs, ranks them, pushes to S3 + Airtable.
+main.py – cron-job entry-point
 """
 
-import json
-import logging
 import os
 import sys
+import logging
 from datetime import datetime
-from pathlib import Path
 from typing import List
 
-import boto3          # make sure boto3 is in requirements.txt
+import boto3
 import pandas as pd
-import requests
-from airtable import Airtable   # pip install airtable-python-wrapper
 
-# --------------------------------------------------------------------------------------
-# 1. configure logging
-# --------------------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────
+# 1. logging setup
+# ──────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    format="%(asctime)s %(levelname)-8s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("cron")
+logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------------------
-# 2. required environment variables
-# --------------------------------------------------------------------------------------
-REQUIRED_ENV_VARS = [
-    "AIRTABLE_BASE",
-    "AIRTABLE_TABLE_NAME",
-    "AIRTABLE_TOKEN",
+# ──────────────────────────────────────────────────────────────
+# 2. required ENV-VARS
+# ──────────────────────────────────────────────────────────────
+REQUIRED_VARS: List[str] = [
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_REGION",
     "S3_BUCKET",
+    # airtable keys are only required if you want to push there
+    # they'll be validated later if PUSH_TO_AIRTABLE is true
 ]
 
-missing = [k for k in REQUIRED_ENV_VARS if not os.getenv(k)]
-if missing:
-    log.error("Required env var%s %s missing",
-              "" if len(missing) == 1 else "s",
-              ", ".join(missing))
-    sys.exit(1)
+for var in REQUIRED_VARS:
+    if not os.getenv(var):
+        logger.error("Required env var %s missing", var)
+        sys.exit(1)
 
-AIRTABLE_BASE        = os.environ["AIRTABLE_BASE"]
-AIRTABLE_TABLE_NAME  = os.environ["AIRTABLE_TABLE_NAME"]
-AIRTABLE_TOKEN       = os.environ["AIRTABLE_TOKEN"]
-S3_BUCKET            = os.environ["S3_BUCKET"]
+# Optional flag – default False
+PUSH_TO_AIRTABLE = os.getenv("PUSH_TO_AIRTABLE", "false").lower() == "true"
 
-# optional – region / prefix
-AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")
-S3_KEY_PREFIX        = os.getenv("S3_KEY_PREFIX", "ranked-jobs")
+if PUSH_TO_AIRTABLE:
+    for var in ("AIRTABLE_API_KEY", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME"):
+        if not os.getenv(var):
+            logger.error(
+                "PUSH_TO_AIRTABLE is true, but env var %s is missing", var
+            )
+            sys.exit(1)
 
-# --------------------------------------------------------------------------------------
-# 4. helper: upload DataFrame to S3
-# --------------------------------------------------------------------------------------
-def upload_df_to_s3(df: pd.DataFrame, bucket: str, key: str) -> str:
-    """Write df to CSV in-memory and upload to S3 — returns the s3:// URL."""
-    import io
+# ──────────────────────────────────────────────────────────────
+# 3. import your ranking function
+#    (ranker.py must live in the same folder or be on PYTHONPATH)
+# ──────────────────────────────────────────────────────────────
+from ranker import rank_jobs  # noqa: E402  (import after env-validation)
 
-    csv_buffer = io.StringIO()
-    df.to_csv(csv_buffer, index=False)
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    s3.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue())
-    url = f"s3://{bucket}/{key}"
-    log.info("✅  Uploaded %d rows to %s", len(df), url)
-    return url
+# ──────────────────────────────────────────────────────────────
+# 4. helpers – S3 and Airtable
+# ──────────────────────────────────────────────────────────────
+s3 = boto3.client(
+    "s3",
+    region_name=os.environ["AWS_REGION"],
+    aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+    aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+)
 
 
-# --------------------------------------------------------------------------------------
-# 5. helper: upsert to Airtable
-# --------------------------------------------------------------------------------------
-def upsert_to_airtable(df: pd.DataFrame) -> None:
-    """Upsert DataFrame rows into Airtable (simple wrapper)."""
-    airtable = Airtable(AIRTABLE_BASE, AIRTABLE_TABLE_NAME, AIRTABLE_TOKEN)
+def read_df_from_s3(bucket: str, key: str) -> pd.DataFrame:
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return pd.read_csv(obj["Body"])
+
+
+def write_df_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
+    csv_bytes = df.to_csv(index=False).encode()
+    s3.put_object(Bucket=bucket, Key=key, Body=csv_bytes)
+    logger.info("✔️  Wrote %d bytes to s3://%s/%s", len(csv_bytes), bucket, key)
+
+
+def push_to_airtable(df: pd.DataFrame) -> None:
+    """Stream rows to Airtable (create-or-update on 'job_id')."""
+    from pyairtable import Table
+
+    table = Table(
+        os.environ["AIRTABLE_API_KEY"],
+        os.environ["AIRTABLE_BASE_ID"],
+        os.environ["AIRTABLE_TABLE_NAME"],
+    )
 
     for _, row in df.iterrows():
-        # Assumes there's a unique 'id' column; adjust as needed.
-        record_id = row["id"]
-        fields = row.dropna().to_dict()
-
-        # Try update first, otherwise create :
-        existing = airtable.match("id", record_id)
-        if existing:
-            airtable.update(existing["id"], fields)
+        record = row.to_dict()
+        # upsert using 'job_id' (or whatever primary key your table uses)
+        job_id = record["job_id"]
+        matches = table.all(formula=f"{{job_id}} = '{job_id}'")
+        if matches:
+            table.update(matches[0]["id"], record)
         else:
-            airtable.insert(fields)
-
-    log.info("✅  Upserted %d rows into Airtable table '%s'", len(df), AIRTABLE_TABLE_NAME)
-
-
-# --------------------------------------------------------------------------------------
-# 6. your scraping / data-loading logic
-# --------------------------------------------------------------------------------------
-def load_raw_jobs() -> pd.DataFrame:
-    """
-    RETURN a DataFrame of raw jobs you want to rank.
-    Replace this stub with the real scraping / DB load work.
-    """
-    # --- TODO: replace with real source -------------------------------------
-    sample = [
-        {"id": "1", "title": "Data Scientist",   "salary": 145000},
-        {"id": "2", "title": "ML Engineer",      "salary": 160000},
-        {"id": "3", "title": "BI Analyst",       "salary": 105000},
-    ]
-    # ------------------------------------------------------------------------
-    df = pd.DataFrame(sample)
-    log.info("Loaded %d raw jobs", len(df))
-    return df
+            table.create(record)
+    logger.info("✔️  Pushed %s rows to Airtable", len(df))
 
 
-# --------------------------------------------------------------------------------------
-# 7. main driver
-# --------------------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────
+# 5. main pipeline
+# ──────────────────────────────────────────────────────────────
+RAW_KEY = "raw/jobs.csv"
+RANKED_KEY = "ranked/jobs.csv"
+BUCKET = os.environ["S3_BUCKET"]
+
+
 def main() -> None:
-    log.info("🚀  Cron started")
+    logger.info("🚀  Cron started")
 
-    # 1. load / scrape
-    raw_df = load_raw_jobs()
+    # ---------------------------------------------------------------------
+    # step 1 – load raw jobs
+    # ---------------------------------------------------------------------
+    raw_df = read_df_from_s3(BUCKET, RAW_KEY)
+    logger.info("Loaded %d raw jobs", len(raw_df))
+
     if raw_df.empty:
-        log.warning("No jobs found – nothing to do")
+        logger.warning("No rows found in %s – exiting early", RAW_KEY)
         return
 
-    # 2. rank
-    # -------------------------------------------------------------------
-# Ranking logic
-# -------------------------------------------------------------------
-def rank_jobs(df):
-    """
-    Accepts a pandas DataFrame of jobs and returns it ordered however
-    you like.  Replace the body with your real ranking algorithm.
-    """
-    # --- example placeholder: leave the rows as–is ---------------
-    return df
+    # ---------------------------------------------------------------------
+    # step 2 – rank
+    # ---------------------------------------------------------------------
+    logger.info("Ranking jobs …")
+    ranked_df = rank_jobs(raw_df.copy())  # <-- your logic in ranker.py
+    logger.info("Ranked %d jobs", len(ranked_df))
 
-    ranked_df = rank_jobs(raw_df.copy())   # your logic in ranker.py
-    log.info("Top job after ranking: %s", ranked_df.iloc[0].to_dict())
+    # ---------------------------------------------------------------------
+    # step 3 – write outputs
+    # ---------------------------------------------------------------------
+    write_df_to_s3(ranked_df, BUCKET, RANKED_KEY)
 
-    # 3. push to S3
-    date_tag = datetime.utcnow().strftime("%Y-%m-%d")
-    s3_key = f"{S3_KEY_PREFIX}/{date_tag}/ranked_jobs.csv"
-    upload_df_to_s3(ranked_df, S3_BUCKET, s3_key)
+    if PUSH_TO_AIRTABLE:
+        push_to_airtable(ranked_df)
 
-    # 4. upsert into Airtable
-    upsert_to_airtable(ranked_df)
-
-    log.info("🏁  Cron finished successfully")
+    logger.info("✅  Pipeline finished successfully")
 
 
-# --------------------------------------------------------------------------------------
+# ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
-        log.exception("❌  Cron crashed: %s", exc)
-        # non-zero exit so Render marks the cron run as failed
-        sys.exit(1)
+    except Exception:
+        logger.exception("Cron crashed")
+        raise
