@@ -79,8 +79,6 @@ def download_http(url: str, dst: Path):
                 fh.write(chunk)
     log.info("📥  downloaded %s → %s", url, dst)
 
-# ────────── ranking (your existing algorithm) ──────────
-from ranker import rank_job           # <-- you already have this module
 
 # ────────── pipeline ──────────
 def main():
