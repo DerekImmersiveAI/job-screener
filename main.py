@@ -1,115 +1,156 @@
 #!/usr/bin/env python3
-# ── main.py  –  BrightData → S3 → Airtable pipeline with ranking ────────────
-import os, csv, time, sys, logging
+"""
+main.py – cron-entry for Render.
+Scrapes / loads raw jobs, ranks them, pushes to S3 + Airtable.
+"""
+
+import json
+import logging
+import os
+import sys
+from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List
 
-import boto3, requests, backoff
+import boto3          # make sure boto3 is in requirements.txt
+import pandas as pd
+import requests
+from airtable import Airtable   # pip install airtable-python-wrapper
 
-# ────────── logging ──────────
+# --------------------------------------------------------------------------------------
+# 1. configure logging
+# --------------------------------------------------------------------------------------
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s  %(levelname)-8s %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("pipeline")
+log = logging.getLogger("cron")
 
-# ────────── env (fail–fast) ──────────
-def env(name: str, *, optional=False, default=None):
-    val = os.getenv(name, default)
-    if val is None and not optional:
-        log.error("Required env var %s missing", name)
-        sys.exit(1)
-    return val
+# --------------------------------------------------------------------------------------
+# 2. required environment variables
+# --------------------------------------------------------------------------------------
+REQUIRED_ENV_VARS = [
+    "AIRTABLE_BASE",
+    "AIRTABLE_TABLE_NAME",
+    "AIRTABLE_TOKEN",
+    "S3_BUCKET",
+]
 
-AIRTABLE_BASE   = env("AIRTABLE_BASE")
-AIRTABLE_TABLE  = env("AIRTABLE_TABLE")
-AIRTABLE_TOKEN  = env("AIRTABLE_TOKEN")
-OPENAI_API_KEY  = env("OPENAI_API_KEY")          # used by your ranker
+missing = [k for k in REQUIRED_ENV_VARS if not os.getenv(k)]
+if missing:
+    log.error("Required env var%s %s missing",
+              "" if len(missing) == 1 else "s",
+              ", ".join(missing))
+    sys.exit(1)
 
-BRIGHTDATA_URL  = os.getenv("BRIGHTDATA_URL") or os.getenv("CSV_URL")
+AIRTABLE_BASE        = os.environ["AIRTABLE_BASE"]
+AIRTABLE_TABLE_NAME  = os.environ["AIRTABLE_TABLE_NAME"]
+AIRTABLE_TOKEN       = os.environ["AIRTABLE_TOKEN"]
+S3_BUCKET            = os.environ["S3_BUCKET"]
 
-# S3 details (only used when no URL override is given)
-S3_BUCKET = env("S3_BUCKET", optional=bool(BRIGHTDATA_URL))
-S3_PREFIX = os.getenv("S3_PREFIX", "")           # optional “folder/”
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+# optional – region / prefix
+AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")
+S3_KEY_PREFIX        = os.getenv("S3_KEY_PREFIX", "ranked-jobs")
 
-# ────────── Airtable tiny client ──────────
-AT_ENDPOINT = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{AIRTABLE_TABLE}"
-AT_HEADERS  = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
-@backoff.on_exception(backoff.expo, requests.RequestException, max_tries=5)
-def airtable_upsert(rows: List[Dict[str, Any]]) -> None:
-    if not rows: return
-    payload = {"records": [{"fields": r} for r in rows]}
-    r = requests.post(AT_ENDPOINT, json=payload, headers=AT_HEADERS, timeout=30)
-    if r.status_code >= 300:
-        log.error("Airtable error %s: %s", r.status_code, r.text[:200])
-        r.raise_for_status()
-    log.info("🆙  sent %s rows to Airtable", len(rows))
+# --------------------------------------------------------------------------------------
+# 3. import your ranking function
+#    (ranker.py needs to be in the same folder or on PYTHONPATH)
+# --------------------------------------------------------------------------------------
+from ranker import rank_jobs   # noqa: E402  (import after env-validation)
 
-# ────────── S3 helpers ──────────
-def latest_s3_object(bucket: str, prefix: str) -> str:
+
+# --------------------------------------------------------------------------------------
+# 4. helper: upload DataFrame to S3
+# --------------------------------------------------------------------------------------
+def upload_df_to_s3(df: pd.DataFrame, bucket: str, key: str) -> str:
+    """Write df to CSV in-memory and upload to S3 — returns the s3:// URL."""
+    import io
+
+    csv_buffer = io.StringIO()
+    df.to_csv(csv_buffer, index=False)
     s3 = boto3.client("s3", region_name=AWS_REGION)
-    newest = None
-    paginator = s3.get_paginator("list_objects_v2")
-    for p in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in p.get("Contents", []):
-            if not obj["Key"].endswith(".csv"):
-                continue
-            if newest is None or obj["LastModified"] > newest["LastModified"]:
-                newest = obj
-    if newest is None:
-        raise RuntimeError(f"No *.csv objects under s3://{bucket}/{prefix or ''}")
-    return newest["Key"]
-
-def download_s3(key: str, dst: Path):
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with dst.open("wb") as fh:
-        s3.download_fileobj(S3_BUCKET, key, fh)
-    log.info("📥  downloaded s3://%s/%s → %s", S3_BUCKET, key, dst)
-
-def download_http(url: str, dst: Path):
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(url, stream=True, timeout=120) as r:
-        r.raise_for_status()
-        with dst.open("wb") as fh:
-            for chunk in r.iter_content(8192):
-                fh.write(chunk)
-    log.info("📥  downloaded %s → %s", url, dst)
+    s3.put_object(Bucket=bucket, Key=key, Body=csv_buffer.getvalue())
+    url = f"s3://{bucket}/{key}"
+    log.info("✅  Uploaded %d rows to %s", len(df), url)
+    return url
 
 
-# ────────── pipeline ──────────
-def main():
-    t0 = time.time()
-    tmp = Path("/tmp/work")
-    csv_path = tmp / "brightdata_latest.csv"
+# --------------------------------------------------------------------------------------
+# 5. helper: upsert to Airtable
+# --------------------------------------------------------------------------------------
+def upsert_to_airtable(df: pd.DataFrame) -> None:
+    """Upsert DataFrame rows into Airtable (simple wrapper)."""
+    airtable = Airtable(AIRTABLE_BASE, AIRTABLE_TABLE_NAME, AIRTABLE_TOKEN)
 
-    # 1️⃣  fetch the latest CSV
-    if BRIGHTDATA_URL:
-        download_http(BRIGHTDATA_URL, csv_path)
-    else:
-        key = latest_s3_object(S3_BUCKET, S3_PREFIX)
-        download_s3(key, csv_path)
+    for _, row in df.iterrows():
+        # Assumes there's a unique 'id' column; adjust as needed.
+        record_id = row["id"]
+        fields = row.dropna().to_dict()
 
-    # 2️⃣  process & push in small batches
-    batch, BATCH_SZ = [], 10
-    with csv_path.open(newline="", encoding="utf-8") as fh:
-        rdr = csv.DictReader(fh)
-        for row in rdr:
-            row["gpt_score"] = rank_job(row)
-            batch.append(row)
-            if len(batch) >= BATCH_SZ:
-                airtable_upsert(batch)
-                batch.clear()
-        airtable_upsert(batch)   # leftovers
+        # Try update first, otherwise create :
+        existing = airtable.match("id", record_id)
+        if existing:
+            airtable.update(existing["id"], fields)
+        else:
+            airtable.insert(fields)
 
-    log.info("✅  finished %s rows in %.1fs", rdr.line_num, time.time() - t0)
+    log.info("✅  Upserted %d rows into Airtable table '%s'", len(df), AIRTABLE_TABLE_NAME)
 
+
+# --------------------------------------------------------------------------------------
+# 6. your scraping / data-loading logic
+# --------------------------------------------------------------------------------------
+def load_raw_jobs() -> pd.DataFrame:
+    """
+    RETURN a DataFrame of raw jobs you want to rank.
+    Replace this stub with the real scraping / DB load work.
+    """
+    # --- TODO: replace with real source -------------------------------------
+    sample = [
+        {"id": "1", "title": "Data Scientist",   "salary": 145000},
+        {"id": "2", "title": "ML Engineer",      "salary": 160000},
+        {"id": "3", "title": "BI Analyst",       "salary": 105000},
+    ]
+    # ------------------------------------------------------------------------
+    df = pd.DataFrame(sample)
+    log.info("Loaded %d raw jobs", len(df))
+    return df
+
+
+# --------------------------------------------------------------------------------------
+# 7. main driver
+# --------------------------------------------------------------------------------------
+def main() -> None:
+    log.info("🚀  Cron started")
+
+    # 1. load / scrape
+    raw_df = load_raw_jobs()
+    if raw_df.empty:
+        log.warning("No jobs found – nothing to do")
+        return
+
+    # 2. rank
+    ranked_df = rank_jobs(raw_df.copy())   # your logic in ranker.py
+    log.info("Top job after ranking: %s", ranked_df.iloc[0].to_dict())
+
+    # 3. push to S3
+    date_tag = datetime.utcnow().strftime("%Y-%m-%d")
+    s3_key = f"{S3_KEY_PREFIX}/{date_tag}/ranked_jobs.csv"
+    upload_df_to_s3(ranked_df, S3_BUCKET, s3_key)
+
+    # 4. upsert into Airtable
+    upsert_to_airtable(ranked_df)
+
+    log.info("🏁  Cron finished successfully")
+
+
+# --------------------------------------------------------------------------------------
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        log.exception("💥  pipeline crashed: %s", exc)
+        log.exception("❌  Cron crashed: %s", exc)
+        # non-zero exit so Render marks the cron run as failed
         sys.exit(1)
