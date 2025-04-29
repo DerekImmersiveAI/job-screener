@@ -53,14 +53,6 @@ S3_BUCKET            = os.environ["S3_BUCKET"]
 AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")
 S3_KEY_PREFIX        = os.getenv("S3_KEY_PREFIX", "ranked-jobs")
 
-
-# --------------------------------------------------------------------------------------
-# 3. import your ranking function
-#    (ranker.py needs to be in the same folder or on PYTHONPATH)
-# --------------------------------------------------------------------------------------
-from ranker import rank_jobs   # noqa: E402  (import after env-validation)
-
-
 # --------------------------------------------------------------------------------------
 # 4. helper: upload DataFrame to S3
 # --------------------------------------------------------------------------------------
