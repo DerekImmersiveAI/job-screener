@@ -124,6 +124,17 @@ def main() -> None:
         return
 
     # 2. rank
+    # -------------------------------------------------------------------
+# Ranking logic
+# -------------------------------------------------------------------
+def rank_jobs(df):
+    """
+    Accepts a pandas DataFrame of jobs and returns it ordered however
+    you like.  Replace the body with your real ranking algorithm.
+    """
+    # --- example placeholder: leave the rows as–is ---------------
+    return df
+
     ranked_df = rank_jobs(raw_df.copy())   # your logic in ranker.py
     log.info("Top job after ranking: %s", ranked_df.iloc[0].to_dict())
 
