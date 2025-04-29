@@ -1,158 +1,117 @@
 #!/usr/bin/env python3
-# ──────────────────────────────────────────────────────────────────────────────
-#  main.py – download newest BrightData CSV from S3, score & upsert to Airtable
-# ──────────────────────────────────────────────────────────────────────────────
-
-import os
-import sys
-import csv
-import json
-import time
-import math
-import boto3
-import logging
-import tempfile
-import requests
+# ── main.py  –  BrightData → S3 → Airtable pipeline with ranking ────────────
+import os, csv, time, sys, logging
 from pathlib import Path
-from datetime import datetime, timezone
 from typing import List, Dict, Any
 
-# ───────────────────────── logging ──────────────────────────
+import boto3, requests, backoff
+
+# ────────── logging ──────────
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s  %(levelname)-8s %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-log = logging.getLogger("job-screener")
+log = logging.getLogger("pipeline")
 
-# ─────────────────────── configuration ──────────────────────
-AIRTABLE_BASE    = os.environ["AIRTABLE_BASE"]
-AIRTABLE_TABLE   = os.environ["AIRTABLE_TABLE"]
-AIRTABLE_TOKEN   = os.environ["AIRTABLE_TOKEN"]
+# ────────── env (fail–fast) ──────────
+def env(name: str, *, optional=False, default=None):
+    val = os.getenv(name, default)
+    if val is None and not optional:
+        log.error("Required env var %s missing", name)
+        sys.exit(1)
+    return val
 
-OPENAI_API_KEY   = os.environ["OPENAI_API_KEY"]
+AIRTABLE_BASE   = env("AIRTABLE_BASE")
+AIRTABLE_TABLE  = env("AIRTABLE_TABLE")
+AIRTABLE_TOKEN  = env("AIRTABLE_TOKEN")
+OPENAI_API_KEY  = env("OPENAI_API_KEY")          # used by your ranker
 
-# Optional overrides
-BRIGHTDATA_URL   = os.getenv("BRIGHTDATA_URL") or os.getenv("CSV_URL")
+BRIGHTDATA_URL  = os.getenv("BRIGHTDATA_URL") or os.getenv("CSV_URL")
 
-# S3 settings
-S3_BUCKET   = os.getenv("S3_BUCKET")        # *required* if BRIGHTDATA_URL not set
-S3_PREFIX   = os.getenv("S3_PREFIX", "")    # optional “folder/”
-AWS_REGION  = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+# S3 details (only used when no URL override is given)
+S3_BUCKET = env("S3_BUCKET", optional=bool(BRIGHTDATA_URL))
+S3_PREFIX = os.getenv("S3_PREFIX", "")           # optional “folder/”
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# ──────────────────── helpers / utilities ───────────────────
+# ────────── Airtable tiny client ──────────
+AT_ENDPOINT = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{AIRTABLE_TABLE}"
+AT_HEADERS  = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
 
-def newest_s3_object(bucket: str, prefix: str = "") -> str:
-    """Return the S3 URI (s3://bucket/key) of the newest *.csv object."""
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    paginator = s3.get_paginator("list_objects_v2")
-    most_recent = None
-
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.endswith(".csv"):
-                continue
-            if (most_recent is None) or (obj["LastModified"] > most_recent["LastModified"]):
-                most_recent = obj
-
-    if not most_recent:
-        raise RuntimeError(f"No CSV files found in s3://{bucket}/{prefix}")
-
-    return f"s3://{bucket}/{most_recent['Key']}"
-
-def download_s3_file(s3_uri: str, dest_path: Path) -> None:
-    """Stream-download an S3 object to dest_path."""
-    bucket, key = s3_uri.replace("s3://", "").split("/", 1)
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    with dest_path.open("wb") as fh:
-        s3.download_fileobj(bucket, key, fh)
-    log.info("📥 downloaded %s → %s", key, dest_path)
-
-def download_http_file(url: str, dest_path: Path) -> None:
-    """Stream-download a large file over HTTP to dest_path."""
-    with requests.get(url, stream=True, timeout=60) as resp:
-        resp.raise_for_status()
-        dest_path.parent.mkdir(parents=True, exist_ok=True)
-        with dest_path.open("wb") as fh:
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    fh.write(chunk)
-    log.info("📥 downloaded %s → %s", url, dest_path)
-
-def get_latest_csv(local_dir: Path) -> Path:
-    """Return Path to latest CSV after downloading it (if needed)."""
-    local_dir.mkdir(parents=True, exist_ok=True)
-    dest = local_dir / "brightdata_latest.csv"
-
-    if BRIGHTDATA_URL:                # explicit URL wins
-        download_http_file(BRIGHTDATA_URL, dest)
-    else:                             # auto-discover newest S3 object
-        if not S3_BUCKET:
-            raise RuntimeError("S3_BUCKET env var missing and no BRIGHTDATA_URL override provided.")
-        s3_uri = newest_s3_object(S3_BUCKET, S3_PREFIX)
-        log.info("🔍 newest S3 object: %s", s3_uri)
-        download_s3_file(s3_uri, dest)
-
-    return dest
-
-# ───────────────────── GPT scoring stub ─────────────────────
-def gpt_score(row: Dict[str, Any]) -> int:
-    """
-    Your existing advanced scoring logic goes here;
-    returning an int 0-10.  (Stubbed to 3 for brevity.)
-    """
-    return 3
-
-# ───────────────────── airtable uploader ────────────────────
-import backoff, requests
-
-AIRTABLE_ENDPOINT = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{AIRTABLE_TABLE}"
-AIRTABLE_HEADERS  = {"Authorization": f"Bearer {AIRTABLE_TOKEN}", "Content-Type": "application/json"}
-
-@backoff.on_exception(backoff.expo, requests.HTTPError, max_tries=5)
-def airtable_batch_upsert(rows: List[Dict[str, Any]]) -> None:
+@backoff.on_exception(backoff.expo, requests.RequestException, max_tries=5)
+def airtable_upsert(rows: List[Dict[str, Any]]) -> None:
+    if not rows: return
     payload = {"records": [{"fields": r} for r in rows]}
-    resp = requests.post(AIRTABLE_ENDPOINT, headers=AIRTABLE_HEADERS, json=payload, timeout=30)
-    if resp.status_code >= 300:
-        log.error("Airtable error: %s", resp.text)
-        resp.raise_for_status()
-    log.info("🆙 airtable batch ok (%s rows)", len(rows))
+    r = requests.post(AT_ENDPOINT, json=payload, headers=AT_HEADERS, timeout=30)
+    if r.status_code >= 300:
+        log.error("Airtable error %s: %s", r.status_code, r.text[:200])
+        r.raise_for_status()
+    log.info("🆙  sent %s rows to Airtable", len(rows))
 
-# ─────────────────────────  main  ───────────────────────────
+# ────────── S3 helpers ──────────
+def latest_s3_object(bucket: str, prefix: str) -> str:
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    newest = None
+    paginator = s3.get_paginator("list_objects_v2")
+    for p in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in p.get("Contents", []):
+            if not obj["Key"].endswith(".csv"):
+                continue
+            if newest is None or obj["LastModified"] > newest["LastModified"]:
+                newest = obj
+    if newest is None:
+        raise RuntimeError(f"No *.csv objects under s3://{bucket}/{prefix or ''}")
+    return newest["Key"]
+
+def download_s3(key: str, dst: Path):
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with dst.open("wb") as fh:
+        s3.download_fileobj(S3_BUCKET, key, fh)
+    log.info("📥  downloaded s3://%s/%s → %s", S3_BUCKET, key, dst)
+
+def download_http(url: str, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with requests.get(url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with dst.open("wb") as fh:
+            for chunk in r.iter_content(8192):
+                fh.write(chunk)
+    log.info("📥  downloaded %s → %s", url, dst)
+
+# ────────── ranking (your existing algorithm) ──────────
+from ranker import rank_job           # <-- you already have this module
+
+# ────────── pipeline ──────────
 def main():
     t0 = time.time()
-    workdir = Path("/tmp/work")
-    csv_path = get_latest_csv(workdir)
+    tmp = Path("/tmp/work")
+    csv_path = tmp / "brightdata_latest.csv"
 
-    # ── read & process ──
-    batch, batch_size = [], 10
+    # 1️⃣  fetch the latest CSV
+    if BRIGHTDATA_URL:
+        download_http(BRIGHTDATA_URL, csv_path)
+    else:
+        key = latest_s3_object(S3_BUCKET, S3_PREFIX)
+        download_s3(key, csv_path)
+
+    # 2️⃣  process & push in small batches
+    batch, BATCH_SZ = [], 10
     with csv_path.open(newline="", encoding="utf-8") as fh:
-        reader = csv.DictReader(fh)
-        for row in reader:
-            row["gpt_score"] = gpt_score(row)
+        rdr = csv.DictReader(fh)
+        for row in rdr:
+            row["gpt_score"] = rank_job(row)
             batch.append(row)
-
-            if len(batch) == batch_size:
-                airtable_batch_upsert(batch)
+            if len(batch) >= BATCH_SZ:
+                airtable_upsert(batch)
                 batch.clear()
+        airtable_upsert(batch)   # leftovers
 
-        if batch:
-            airtable_batch_upsert(batch)
+    log.info("✅  finished %s rows in %.1fs", rdr.line_num, time.time() - t0)
 
-    elapsed = time.time() - t0
-    log.info("🎉 pipeline completed in %.1fs", elapsed)
-
-# ────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         main()
-    except KeyError as ke:
-        env = str(ke).strip("'")
-        log.error("Required environment variable %s not found. Set it in Render → Environment.", env)
-        sys.exit(1)
     except Exception as exc:
-        log.exception("Unhandled exception: %s", exc)
+        log.exception("💥  pipeline crashed: %s", exc)
         sys.exit(1)
