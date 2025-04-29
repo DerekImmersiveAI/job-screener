@@ -1,147 +1,123 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-main.py – cron-job entry-point
-"""
-
 import os
-import sys
+import json
 import logging
-from datetime import datetime
-from typing import List
-
+import time
 import boto3
 import pandas as pd
+from datetime import datetime
+from pyairtable import Table
+from openai import OpenAI  # Correct OpenAI import
 
-# ──────────────────────────────────────────────────────────────
-# 1. logging setup
-# ──────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)-8s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+client = OpenAI()  # Proper initialization
 
-# ──────────────────────────────────────────────────────────────
-# 2. required ENV-VARS
-# ──────────────────────────────────────────────────────────────
-REQUIRED_VARS: List[str] = [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_REGION",
-    "S3_BUCKET",
-    # airtable keys are only required if you want to push there
-    # they'll be validated later if PUSH_TO_AIRTABLE is true
-]
+# === Load config from environment ===
+AIRTABLE_TOKEN = os.getenv("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
+AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_BUCKET = os.getenv("AWS_BUCKET_NAME")
 
-for var in REQUIRED_VARS:
-    if not os.getenv(var):
-        logger.error("Required env var %s missing", var)
-        sys.exit(1)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Optional flag – default False
-PUSH_TO_AIRTABLE = os.getenv("PUSH_TO_AIRTABLE", "false").lower() == "true"
+def fetch_latest_json_from_s3():
+    try:
+        s3 = boto3.client(
+            "s3",
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+        )
+        response = s3.list_objects_v2(Bucket=AWS_BUCKET)
+        files = response.get("Contents", [])
+        json_files = [f for f in files if f["Key"].endswith(".json")]
+        latest = max(json_files, key=lambda f: f["LastModified"])
+        logging.info(f"📥 Downloaded {latest['Key']} to brightdata_latest.json")
+        s3.download_file(AWS_BUCKET, latest["Key"], "brightdata_latest.json")
+        return "brightdata_latest.json"
+    except Exception as e:
+        logging.error(f"S3 download error: {e}")
+        return None
 
-if PUSH_TO_AIRTABLE:
-    for var in ("AIRTABLE_API_KEY", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_NAME"):
-        if not os.getenv(var):
-            logger.error(
-                "PUSH_TO_AIRTABLE is true, but env var %s is missing", var
-            )
-            sys.exit(1)
+def score_job(job):
+    prompt = f"""
+You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
+- Role relevance to 'Data Science'
+- Seniority (prefer senior roles)
+- Remote work option
+- Salary (prefer $140k+)
 
-# ──────────────────────────────────────────────────────────────
-# 3. import your ranking function
-#    (ranker.py must live in the same folder or be on PYTHONPATH)
-# ──────────────────────────────────────────────────────────────
-# ──────────────────────────────────────────────────────────────
-# 4. helpers – S3 and Airtable
-# ──────────────────────────────────────────────────────────────
-s3 = boto3.client(
-    "s3",
-    region_name=os.environ["AWS_REGION"],
-    aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
-    aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
-)
+Job Title: {job.get("job_title")}
+Company: {job.get("company_name")}
+Summary: {job.get("job_summary")}
+Location: {job.get("job_location")}
+Salary: {job.get("base_salary")}
+Description: {job.get("job_description")}
 
+Respond in this format:
+Score: X/10
+Reason: [short reason]
+    """
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        content = response.choices[0].message.content.strip()
+        score_line = next((line for line in content.splitlines() if "Score" in line), "Score: 0/10")
+        score = int(score_line.split(":")[1].split("/")[0].strip())
+        return score, content
+    except Exception as e:
+        logging.error(f"OpenAI error: {e}")
+        return 0, f"Score: 0/10\nReason: OpenAI error: {e}"
 
-def read_df_from_s3(bucket: str, key: str) -> pd.DataFrame:
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    return pd.read_csv(obj["Body"])
+def push_to_airtable(job, score, reason):
+    try:
+        table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+        fields = {
+            "job_title": job.get("job_title"),
+            "company_name": job.get("company_name"),
+            "job_location": job.get("job_location"),
+            "job_summary": job.get("job_summary"),
+            "job_function": job.get("job_function"),
+            "job_industries": job.get("job_industries"),
+            "job_base_pay_range": job.get("job_base_pay_range"),
+            "url": job.get("url"),
+            "job_posted_time": job.get("job_posted_time"),
+            "job_num_applicants": job.get("job_num_applicants"),
+            "Score": score,
+            "Reason": reason,
+        }
 
+        # Only include job_poster if valid length (Airtable 255 char limit)
+        poster = job.get("job_poster")
+        if isinstance(poster, str) and len(poster.strip()) > 0 and len(poster.strip()) <= 255:
+            fields["job_poster"] = poster.strip()
 
-def write_df_to_s3(df: pd.DataFrame, bucket: str, key: str) -> None:
-    csv_bytes = df.to_csv(index=False).encode()
-    s3.put_object(Bucket=bucket, Key=key, Body=csv_bytes)
-    logger.info("✔️  Wrote %d bytes to s3://%s/%s", len(csv_bytes), bucket, key)
+        table.create(fields)
+        logging.info(f"✅ Added to Airtable: {job.get('job_title')} at {job.get('company_name')}")
+    except Exception as e:
+        logging.error(f"❌ Airtable error: {e}")
 
-
-def push_to_airtable(df: pd.DataFrame) -> None:
-    """Stream rows to Airtable (create-or-update on 'job_id')."""
-    from pyairtable import Table
-
-    table = Table(
-        os.environ["AIRTABLE_API_KEY"],
-        os.environ["AIRTABLE_BASE_ID"],
-        os.environ["AIRTABLE_TABLE_NAME"],
-    )
-
-    for _, row in df.iterrows():
-        record = row.to_dict()
-        # upsert using 'job_id' (or whatever primary key your table uses)
-        job_id = record["job_id"]
-        matches = table.all(formula=f"{{job_id}} = '{job_id}'")
-        if matches:
-            table.update(matches[0]["id"], record)
-        else:
-            table.create(record)
-    logger.info("✔️  Pushed %s rows to Airtable", len(df))
-
-
-# ──────────────────────────────────────────────────────────────
-# 5. main pipeline
-# ──────────────────────────────────────────────────────────────
-RAW_KEY = "raw/jobs.csv"
-RANKED_KEY = "ranked/jobs.csv"
-BUCKET = os.environ["S3_BUCKET"]
-
-
-def main() -> None:
-    logger.info("🚀  Cron started")
-
-    # ---------------------------------------------------------------------
-    # step 1 – load raw jobs
-    # ---------------------------------------------------------------------
-    raw_df = read_df_from_s3(BUCKET, RAW_KEY)
-    logger.info("Loaded %d raw jobs", len(raw_df))
-
-    if raw_df.empty:
-        logger.warning("No rows found in %s – exiting early", RAW_KEY)
+def main():
+    logging.info("🚀 Starting job screener...")
+    filepath = fetch_latest_json_from_s3()
+    if not filepath:
+        logging.error("🚨 Job screener failed: no file retrieved from S3.")
         return
 
-    # ---------------------------------------------------------------------
-    # step 2 – rank
-    # ---------------------------------------------------------------------
-    logger.info("Ranking jobs …")
-    ranked_df = rank_jobs(raw_df.copy())  # <-- your logic in ranker.py
-    logger.info("Ranked %d jobs", len(ranked_df))
+    with open(filepath, "r") as f:
+        jobs = json.load(f)
 
-    # ---------------------------------------------------------------------
-    # step 3 – write outputs
-    # ---------------------------------------------------------------------
-    write_df_to_s3(ranked_df, BUCKET, RANKED_KEY)
+    if isinstance(jobs, dict) and "data" in jobs:
+        jobs = jobs["data"]
 
-    if PUSH_TO_AIRTABLE:
-        push_to_airtable(ranked_df)
+    logging.info(f"📊 Loaded {len(jobs)} jobs from JSON")
 
-    logger.info("✅  Pipeline finished successfully")
+    for job in jobs:
+        score, reason = score_job(job)
+        logging.info(f"🧠 GPT score: {score}/10")
+        push_to_airtable(job, score, reason)
+        time.sleep(1)
 
-
-# ──────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        logger.exception("Cron crashed")
-        raise
+    main()
