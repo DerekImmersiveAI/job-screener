@@ -55,8 +55,6 @@ if PUSH_TO_AIRTABLE:
 # 3. import your ranking function
 #    (ranker.py must live in the same folder or be on PYTHONPATH)
 # ──────────────────────────────────────────────────────────────
-from ranker import rank_jobs  # noqa: E402  (import after env-validation)
-
 # ──────────────────────────────────────────────────────────────
 # 4. helpers – S3 and Airtable
 # ──────────────────────────────────────────────────────────────
