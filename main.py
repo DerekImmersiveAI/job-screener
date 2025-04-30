@@ -1,35 +1,63 @@
 #!/usr/bin/env python3
+# main.py – S3 ➜ CSV ➜ filter (<7 days old + category keywords) ➜ GPT score ➜ Airtable
 # ────────────────────────────────────────────────────────────────────────────────
-# main.py – download the newest jobs file from S3, score each job with GPT-4,
-#            then push the results to Airtable.
-# ────────────────────────────────────────────────────────────────────────────────
-import os
-import time
-import json
-import logging
-from datetime import datetime
+import os, time, logging, re
+from datetime import datetime, timezone, timedelta
 
-import boto3
-import pandas as pd
+import boto3, pandas as pd
 from pyairtable import Table
 from openai import OpenAI
 
-# ─── Environment / configuration ───────────────────────────────────────────────
+# ─── Category buckets ──────────────────────────────────────────────────────────
+ALLOWED_CATEGORIES: dict[str, list[str]] = {
+    "AI Expertise": [
+        "rag", "prompt engineer", "llm", "generative ai", "nlp",
+        "contextual understanding", "conversational analytics"
+    ],
+    "Machine Learning": [
+        "gan", "reinforcement", "rnn", "cnn", "transformer", "hyperparameter",
+        "model tuning"
+    ],
+    "Data Science": [
+        "data scientist", "feature engineering", "regression",
+        "clustering", "unsupervised", "semi-supervised"
+    ],
+    "Data Analytics": [
+        "statistical analysis", "exploratory data analysis", "eda",
+        "predictive modelling", "a/b testing", "hypothesis testing",
+        "segmentation", "rfm"
+    ],
+    "Visualization": ["tableau", "power bi", "looker", "domo", "data viz"],
+    "Data Governance": ["data governance", "data security", "data privacy"],
+    "Engineering": [
+        "machine learning engineer", "data engineer", "site reliability",
+        "sre", "devops", "full stack", "backend engineer", "frontend engineer",
+        "software engineer", "cloud engineer", "api engineer", "systems engineer",
+        "blockchain engineer", "etl", "big data"
+    ],
+}
+KEYWORD_PATTERN = re.compile(
+    r"|".join(re.escape(k) for kws in ALLOWED_CATEGORIES.values() for k in kws),
+    flags=re.I,
+)
+
+# ─── Age limit ─────────────────────────────────────────────────────────────────
+MAX_AGE_DAYS = 7
+
+# ─── Env / config ──────────────────────────────────────────────────────────────
 AIRTABLE_TOKEN       = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID     = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME  = os.getenv("AIRTABLE_TABLE_NAME")
-
 AWS_ACCESS_KEY       = os.getenv("AWS_ACCESS_KEY_ID")
 AWS_SECRET_KEY       = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET           = os.getenv("AWS_BUCKET_NAME")
-AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")          # default
-
-S3_PREFIX            = os.getenv("S3_PREFIX", "")  # e.g. "incoming/" (can be "")
-FILE_EXT             = ".csv"                      # we store CSV files in S3
+AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")
+S3_PREFIX            = os.getenv("S3_PREFIX", "")
+FILE_EXT             = ".csv"
 
 assert all([AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME,
             AWS_ACCESS_KEY,  AWS_SECRET_KEY,  AWS_BUCKET]), \
-       "🔑 One or more required environment variables are missing!"
+       "🔑 Missing required environment variables!"
 
 # ─── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -39,99 +67,94 @@ logging.basicConfig(
 )
 
 # ─── External clients ──────────────────────────────────────────────────────────
-client = OpenAI()                     # OpenAI
-table  = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)  # Airtable
-
-s3 = boto3.client(
+client = OpenAI()
+table  = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+s3     = boto3.client(
     "s3",
-    region_name      = AWS_REGION,
-    aws_access_key_id= AWS_ACCESS_KEY,
+    region_name           = AWS_REGION,
+    aws_access_key_id     = AWS_ACCESS_KEY,
     aws_secret_access_key = AWS_SECRET_KEY,
 )
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 def fetch_latest_from_s3() -> str | None:
-    """
-    Download the newest *.csv file from S3 and return the local filename,
-    or None if nothing was found / downloaded.
-    """
     try:
-        resp      = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX)
-        objects   = resp.get("Contents", [])
-        csv_objs  = [o for o in objects if o["Key"].endswith(FILE_EXT)]
+        resp     = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX)
+        csv_objs = [o for o in resp.get("Contents", []) if o["Key"].endswith(FILE_EXT)]
         if not csv_objs:
-            logging.error("S3: no %s files found in bucket %s/%s",
-                          FILE_EXT, AWS_BUCKET, S3_PREFIX)
+            logging.error("S3: no %s files found in bucket %s/%s", FILE_EXT, AWS_BUCKET, S3_PREFIX)
             return None
-
         latest = max(csv_objs, key=lambda o: o["LastModified"])
         key    = latest["Key"]
-        local  = os.path.basename(key)      # e.g. jobs_2025-04-29.csv
+        local  = os.path.basename(key)
         logging.info("📥 Downloading s3://%s/%s", AWS_BUCKET, key)
         s3.download_file(AWS_BUCKET, key, local)
         return local
-
     except Exception as exc:
         logging.error("S3 download error: %s", exc)
         return None
 
 
+def job_in_scope(row: pd.Series) -> bool:
+    """True if the job matches one of our categories *and* is recent enough."""
+    # 1 — age filter
+    posted = pd.to_datetime(row.get("job_posted_time"), utc=True, errors="coerce")
+    if posted is pd.NaT or (datetime.now(timezone.utc) - posted) > timedelta(days=MAX_AGE_DAYS):
+        return False
+    # 2 — keyword filter
+    haystack = " ".join(
+        str(row.get(field, "")).lower()
+        for field in ("job_title", "job_summary", "job_description")
+    )
+    return bool(KEYWORD_PATTERN.search(haystack))
+
+
 def score_job(job: dict) -> tuple[int, str]:
-    """
-    Ask GPT-4 to rate the job. Returns (score, full-text-reason).
-    """
     prompt = f"""
-You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
-• Role relevance to "Data Science"
-• Seniority (prefer senior roles)
-• Remote work option
-• Salary (prefer $140k+)
+You are an AI job screener.  Rate this job from 1-10 based on:
+
+• **Relevance to any of the following buckets** → {", ".join(ALLOWED_CATEGORIES.keys())}
+• Job posted date (more recent ≫ better; everything is ≤ {MAX_AGE_DAYS} days)
+• Seniority (prefer senior / lead / principal)
+• Remote option (prefer fully-remote or hybrid)
+• Salary (prefer ≳ $140 k)
 
 Job Title: {job.get('job_title')}
 Company: {job.get('company_name')}
 Summary: {job.get('job_summary')}
 Location: {job.get('job_location')}
 Salary: {job.get('base_salary')}
+Posted:  {job.get('job_posted_time')}
 Description: {job.get('job_description')}
 
-Respond in this format:
+Respond **exactly** in this format:
 Score: X/10
-Reason: [short reason]
+Reason: <one short sentence>
 """
     try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",        # or "gpt-4o" / "gpt-4-turbo"
+        resp       = client.chat.completions.create(
+            model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
         )
         content    = resp.choices[0].message.content.strip()
-        score_line = next((ln for ln in content.splitlines() if "Score" in ln), "Score: 0/10")
+        score_line = next((l for l in content.splitlines() if "Score" in l), "Score: 0/10")
         score      = int(score_line.split(":")[1].split("/")[0].strip())
         return score, content
-
     except Exception as exc:
         logging.error("OpenAI error: %s", exc)
         return 0, f"Score: 0/10\nReason: OpenAI error: {exc}"
 
 
-def sanitize(value):
-    """
-    Convert NaNs / None / floats like nan → None (Airtable ignores empty fields).
-    Strings > 10 000 chars are truncated (Airtable cell limit).
-    """
-    if pd.isna(value):
+def sanitize(v):
+    if pd.isna(v) or (isinstance(v, float) and v != v):
         return None
-    if isinstance(value, float) and value != value:  # NaN check
-        return None
-    if isinstance(value, str) and len(value) > 10000:
-        return value[:10000]
-    return value
+    if isinstance(v, str) and len(v) > 10_000:
+        return v[:10_000]
+    return v
 
 
 def push_to_airtable(job: dict, score: int, reason: str) -> None:
-    """
-    Send a single record to Airtable.
-    """
     try:
         fields = {
             "job_title"         : sanitize(job.get("job_title")),
@@ -147,15 +170,11 @@ def push_to_airtable(job: dict, score: int, reason: str) -> None:
             "Score"             : score,
             "Reason"            : reason,
         }
-
         poster = sanitize(job.get("job_poster"))
-        if poster is not None:
+        if poster:
             fields["job_poster"] = poster
-
         table.create(fields)
-        logging.info("✅ Airtable: added %s at %s",
-                     fields.get("job_title"), fields.get("company_name"))
-
+        logging.info("✅ Airtable: added %s at %s", fields['job_title'], fields['company_name'])
     except Exception as exc:
         logging.error("❌ Airtable error: %s", exc)
 
@@ -165,28 +184,25 @@ def main() -> None:
     logging.info("🚀 Starting job screener...")
     path = fetch_latest_from_s3()
     if not path:
-        logging.error("🚨 Job screener failed: no file retrieved from S3.")
+        logging.error("🚨 No file retrieved from S3.")
         return
-
-    # Read CSV
     try:
         df = pd.read_csv(path, keep_default_na=True)
     except Exception as exc:
         logging.error("CSV read error: %s", exc)
         return
 
-    # ── Clean dataframe ───────────────────────────────────────────────────────
-    df = df.dropna(how="all")                         # remove completely blank rows
-    df = df.dropna(subset=["job_title", "company_name"])  # require these two cols
+    # clean + filter
+    df = df.dropna(how="all")
+    df = df.dropna(subset=["job_title", "company_name"])
+    df = df[df.apply(job_in_scope, axis=1)]
+    logging.info("📊 After filtering, %d rows remain", len(df))
 
-    logging.info("📊 Loaded %d usable rows from CSV", len(df))
-
-    # Iterate rows → GPT score → Airtable
     for job in df.to_dict("records"):
         score, reason = score_job(job)
         logging.info("🧠 GPT score: %d/10", score)
         push_to_airtable(job, score, reason)
-        time.sleep(1)          # be nice to Airtable API limits
+        time.sleep(1)        # Airtable rate-limit buffer
 
 
 if __name__ == "__main__":
