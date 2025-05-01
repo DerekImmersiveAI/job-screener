@@ -1,141 +1,126 @@
 #!/usr/bin/env python3
-# ─────────────────────────────────────────────────────────────────────────────
-#  Bright-Data Job Screener  ▸  pushes selected jobs to Airtable
-#  • Category filter:   AI Expertise, Machine Learning, Data Science, etc.
-#  • Relevance score:   #matched-keywords in title + description
-#  • Age filter:        *DISABLED*  (no “< 7 days” check)
-# ─────────────────────────────────────────────────────────────────────────────
-
+import os
 import csv
 import logging
-import os
-import re
 from pathlib import Path
-from typing import List
+from datetime import datetime, timezone
 
+import boto3             # pip install boto3
 import pandas as pd
-from pyairtable import Table
+from pyairtable import Api
 from pyairtable.formulas import match
 
-# ── config ───────────────────────────────────────────────────────────────────
-CSV_URI              = os.getenv("CSV_URI")              # e.g. s3://bucket/file.csv
-AIRTABLE_TOKEN       = os.getenv("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID     = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME  = os.getenv("AIRTABLE_TABLE_NAME")
-MAX_ROWS             = int(os.getenv("MAX_ROWS", 100))   # safety-valve
+# -------------------------------
+# CONFIG (env vars or hard-code)
+# -------------------------------
+AWS_REGION         = os.getenv("AWS_REGION", "us-east-1")
+S3_BUCKET          = os.getenv("S3_BUCKET",  "brightdata-job-screener")
+S3_PREFIX          = os.getenv("S3_PREFIX",  "")           # e.g. "exports/"
+AIRTABLE_TOKEN     = os.getenv("AIRTABLE_TOKEN")
+AIRTABLE_BASE_ID   = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Jobs")
 
-CATEGORIES: List[str] = [
-    "AI Expertise",
-    "Machine Learning",
-    "Data Science",
-    "Data Analytics",
-    "Visualization",
-    "Data Governance",
-    "Engineering",
-]
-
-CATEGORY_REGEX = re.compile("|".join(
-    [re.escape(c) for c in CATEGORIES if c.strip()]), flags=re.I)
+CATEGORIES = {
+    "ai expertise", "machine learning", "data science",
+    "data analytics", "visualization", "data governance",
+    "engineering"
+}
+# lower-cased for case-insensitive matching
+# -------------------------------
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-def download_csv(uri: str, dest: Path) -> Path:
-    """Very thin wrapper – works for local paths or pre-mounted cloud URIs."""
-    if uri.startswith(("http://", "https://", "s3://")):
-        import boto3, botocore  # only used when really needed
-        if uri.startswith("s3://"):
-            s3 = boto3.client("s3")
-            bucket, key = uri[5:].split("/", 1)
-            s3.download_file(bucket, key, str(dest))
-        else:  # https://
-            import requests
-            r = requests.get(uri, timeout=30)
-            r.raise_for_status()
-            dest.write_bytes(r.content)
-    else:
-        dest = Path(uri).expanduser().resolve()
+# ---------- S3 HELPERS ---------- #
+def latest_csv_from_s3(bucket: str, prefix: str = "") -> str:
+    """Return S3 URI (s3://bucket/key) of the latest .csv file under prefix."""
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    paginator = s3.get_paginator("list_objects_v2")
+    newest = None
+
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if not key.lower().endswith(".csv"):
+                continue
+            if (newest is None) or (obj["LastModified"] > newest["LastModified"]):
+                newest = obj
+
+    if newest is None:
+        raise RuntimeError(f"No CSV files found in s3://{bucket}/{prefix}")
+
+    key = newest["Key"]
+    logging.info("📄 Latest CSV detected: s3://%s/%s (modified %s)",
+                 bucket, key, newest["LastModified"])
+    return f"s3://{bucket}/{key}"
+
+
+def download_s3_uri(s3_uri: str, dest: Path) -> Path:
+    """Download the given s3:// URI to dest and return dest."""
+    if not s3_uri.startswith("s3://"):
+        raise ValueError("download_s3_uri expects an s3:// URI")
+
+    bucket, key = s3_uri[5:].split("/", 1)
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    s3.download_file(bucket, key, str(dest))
+    logging.info("⬇️  Downloaded %s to %s", s3_uri, dest)
     return dest
 
+# ---------- FILTER / RANK ---------- #
+def relevant(row: pd.Series) -> bool:
+    """Return True if the job row belongs to a desired category."""
+    title = str(row.get("job_title", "")).lower()
+    category = str(row.get("job_category", "")).lower()
+    combined = f"{title} {category}"
+    return any(term in combined for term in CATEGORIES)
 
-def relevant(row) -> int:
-    """Relevance score = matched keywords in title + description."""
-    text = f"{row.get('job_title','')} {row.get('job_description','')}".lower()
-    return sum(k.lower() in text for k in CATEGORIES)
+def rank(df: pd.DataFrame) -> pd.DataFrame:
+    """Simple relevancy rank: # of category keywords appearing in title+category."""
+    def score_row(row):
+        text = f"{row.get('job_title','')} {row.get('job_category','')}".lower()
+        return sum(term in text for term in CATEGORIES)
 
+    df["score"] = df.apply(score_row, axis=1)
+    return df.sort_values("score", ascending=False)
 
-def push_to_airtable(table: Table, row: pd.Series):
-    """Insert or update by external ID (job_posting_id if present)."""
-    record = {
-        "Job Title": row.get("job_title"),
-        "Company": row.get("company_name"),
-        "Location": row.get("job_location"),
-        "Posted": row.get("job_posted_time"),
-        "Relevance": row.get("relevance"),
-        "Apply Link": row.get("apply_link") or row.get("url"),
-    }
-    ext_id = str(row.get("job_posting_id") or row.get("url"))
-    # upsert
-    existing = table.first(formula=match({"External ID": ext_id}))
-    record["External ID"] = ext_id
-    if existing:
-        table.update(existing["id"], record)
-    else:
-        table.create(record)
-
-
-# ── main ─────────────────────────────────────────────────────────────────────
+# ---------- MAIN ---------- #
 def main():
     logging.info("🚀 Starting job screener…")
-    tmp_csv = download_csv(CSV_URI, Path("/tmp/jobs.csv"))
-    df = pd.read_csv(tmp_csv).fillna("")
 
-    logging.info("📊 Loaded %d rows from CSV", len(df))
+    # 1. Find latest CSV and download
+    latest_uri = latest_csv_from_s3(S3_BUCKET, S3_PREFIX)
+    tmp_csv = download_s3_uri(latest_uri, Path("/tmp/jobs.csv"))
 
-    # 1️⃣ CATEGORY FILTER ------------------------------------------------------
-    # candidate text to search
-    text = (
-        df["job_title"].astype(str)
-        + " " +
-        df.get("job_description", "").astype(str)
-    )
-    mask = text.str.contains(CATEGORY_REGEX, na=False)
-    df = df[mask]
+    # 2. Load
+    df = pd.read_csv(tmp_csv)
+    logging.info("📥 Loaded %d rows from CSV", len(df))
+
+    # 3. Filter
+    df = df[df.apply(relevant, axis=1)]
     logging.info("🔍 After category filter: %d rows remain", len(df))
 
     if df.empty:
-        logging.warning("⚠️  No rows matched the category list – exiting.")
+        logging.warning("No matching rows – exiting.")
         return
 
-    # 2️⃣ RELEVANCE SCORE ------------------------------------------------------
-    df["relevance"] = df.apply(relevant, axis=1)
-    df = df[df["relevance"] > 0]
+    df = rank(df)
 
-    if df.empty:
-        logging.warning("⚠️  All rows scored 0 relevance – exiting.")
-        return
+    # 4. Push to Airtable
+    table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
-    df = df.sort_values(
-        ["relevance", "job_posted_time"],
-        ascending=[False, False]
-    ).head(MAX_ROWS)
-
-    # 3️⃣ PUSH TO AIRTABLE -----------------------------------------------------
-    table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-    pushed = 0
     for _, row in df.iterrows():
-        try:
-            push_to_airtable(table, row)
-            pushed += 1
-        except Exception as exc:
-            logging.error("Failed to push row (%s): %s", row.get("job_title"), exc)
-
-    logging.info("✅ Finished – %d records synced to Airtable", pushed)
-
+        record = {
+            "Job Title": row.get("job_title"),
+            "Company": row.get("company_name"),
+            "Location": row.get("job_location"),
+            "Posted": row.get("job_posted_date"),
+            "Source": row.get("apply_link"),
+            "Relevancy Score": int(row["score"]),
+        }
+        table.create(record)
+        logging.info("✅ Airtable: added %s", record["Job Title"])
 
 if __name__ == "__main__":
     main()
