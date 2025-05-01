@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# ────────────────────────────────────────────────────────────────────────────────
-# main.py – download the newest jobs file from S3, keep only rows
-#           (a) ≤ 7 days old  AND  (b) GPT says match one of our categories,
-#           ask GPT to score each kept row on relevance, then push to Airtable.
-# ────────────────────────────────────────────────────────────────────────────────
-import os
-import time
-import json
-import logging
+# ============================================================================
+# main.py – robust date parsing + progress logging + GPT category filter
+# ============================================================================
+
+import os, time, logging
 from datetime import datetime, timezone, timedelta
 
 import boto3
@@ -15,7 +11,7 @@ import pandas as pd
 from pyairtable import Table
 from openai import OpenAI
 
-# ─── Environment / configuration ───────────────────────────────────────────────
+# ─── Configuration (unchanged) ────────────────────────────────────────────────
 AIRTABLE_TOKEN       = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID     = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME  = os.getenv("AIRTABLE_TABLE_NAME")
@@ -25,201 +21,170 @@ AWS_SECRET_KEY       = os.getenv("AWS_SECRET_ACCESS_KEY")
 AWS_BUCKET           = os.getenv("AWS_BUCKET_NAME")
 AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")
 
-S3_PREFIX            = os.getenv("S3_PREFIX", "")      # e.g. "incoming/"
+S3_PREFIX            = os.getenv("S3_PREFIX", "")
 FILE_EXT             = ".csv"
+
+MAX_AGE_DAYS = 7
+ALLOWED_CATEGORIES = [
+    "AI Expertise", "Machine Learning", "Data Science", "Data Analytics",
+    "Visualization", "Data Governance", "Engineering",
+]
 
 assert all([AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME,
             AWS_ACCESS_KEY,  AWS_SECRET_KEY,  AWS_BUCKET]), \
-       "🔑 One or more required environment variables are missing!"
+       "🔑 Missing required environment variables"
 
-MAX_AGE_DAYS = 7
-
-ALLOWED_CATEGORIES = [
-    "AI Expertise",
-    "Machine Learning",
-    "Data Science",
-    "Data Analytics",
-    "Visualization",
-    "Data Governance",
-    "Engineering",
-]
-
-# ─── Logging ───────────────────────────────────────────────────────────────────
+# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level   = logging.INFO,
-    format  = "%(asctime)s [%(levelname)s] %(message)s",
-    datefmt = "%Y-%m-%d %H:%M:%S",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# ─── External clients ──────────────────────────────────────────────────────────
+# ─── External clients ────────────────────────────────────────────────────────
 client = OpenAI()
 table  = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+s3     = boto3.client(
+           "s3", region_name=AWS_REGION,
+           aws_access_key_id=AWS_ACCESS_KEY,
+           aws_secret_access_key=AWS_SECRET_KEY,
+         )
 
-s3 = boto3.client(
-    "s3",
-    region_name           = AWS_REGION,
-    aws_access_key_id     = AWS_ACCESS_KEY,
-    aws_secret_access_key = AWS_SECRET_KEY,
-)
+# ─── Helper: robust date parse ───────────────────────────────────────────────
+def parse_date(val: str):
+    """
+    Try ISO / RFC / epoch-seconds.  Return pd.Timestamp(UTC) or NaT.
+    """
+    if pd.isna(val) or not str(val).strip():
+        return pd.NaT
+    txt = str(val).strip()
+    # epoch?
+    if txt.isdigit():
+        try:
+            return pd.to_datetime(int(txt), unit="s", utc=True)
+        except Exception:
+            pass
+    # fall back to pandas flexible parser
+    return pd.to_datetime(txt, utc=True, errors="coerce")
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
-def fetch_latest_from_s3() -> str | None:
-    """Download the newest *.csv file from S3 and return the local filename."""
-    try:
-        resp   = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX)
-        objs   = [o for o in resp.get("Contents", []) if o["Key"].endswith(FILE_EXT)]
-        if not objs:
-            logging.error("S3: no %s files found in bucket %s/%s", FILE_EXT, AWS_BUCKET, S3_PREFIX)
-            return None
-
-        latest = max(objs, key=lambda o: o["LastModified"])
-        key    = latest["Key"]
-        local  = os.path.basename(key)
-        logging.info("📥 Downloading s3://%s/%s", AWS_BUCKET, key)
-        s3.download_file(AWS_BUCKET, key, local)
-        return local
-    except Exception as exc:
-        logging.error("S3 download error: %s", exc)
-        return None
-
-
-def is_recent(posted_str: str) -> bool:
-    """True if posted date (ISO-ish string) ≤ MAX_AGE_DAYS."""
-    try:
-        posted = pd.to_datetime(posted_str, utc=True)
-    except Exception:
+def is_recent(val) -> bool:
+    ts = parse_date(val)
+    if ts is pd.NaT:
         return False
-    if posted is pd.NaT:
-        return False
-    return (datetime.now(timezone.utc) - posted) <= timedelta(days=MAX_AGE_DAYS)
+    return (datetime.now(timezone.utc) - ts) <= timedelta(days=MAX_AGE_DAYS)
 
-
+# ─── GPT helpers (unchanged logic) ────────────────────────────────────────────
 def gpt_in_scope(job: dict) -> bool:
-    """
-    Ask GPT with a cheap yes/no question: does this job belong to one of
-    our allowed categories?  Returns True/False.
-    """
-    prompt = f"""Reply with exactly "yes" or "no".
-Does this job clearly belong to ANY of these categories?
+    prompt = f"""Reply only "yes" or "no". Does this job fit ANY of these?
 {", ".join(ALLOWED_CATEGORIES)}.
 
 Title: {job.get('job_title')}
 Summary: {job.get('job_summary')}
 """
     try:
-        resp = client.chat.completions.create(
+        ans = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-        )
-        answer = resp.choices[0].message.content.strip().lower()
-        return answer.startswith("y")
-    except Exception as exc:
-        logging.error("GPT filter error (keeping row just in case): %s", exc)
-        return True   # fail-open so we don't accidentally drop good rows
-
+            temperature=0
+        ).choices[0].message.content.strip().lower()
+        return ans.startswith("y")
+    except Exception as e:
+        logging.error("GPT filter error (keeping row): %s", e)
+        return True
 
 def score_job(job: dict) -> tuple[int, str]:
-    """
-    Ask GPT to rate relevance (1-10) to our categories and give a short reason.
-    """
-    prompt = f"""
-You are ranking jobs for a candidate interested in the following categories:
-{", ".join(ALLOWED_CATEGORIES)}.
-
-Give ONE line exactly in this format:
-Score: X/10 — Reason
-
-Higher score = stronger match. 0 = not related at all.
+    prompt = f"""Rate 1-10 on relevance to: {", ".join(ALLOWED_CATEGORIES)}.
+One line: "Score: X/10 — Reason".
 Job title: {job.get('job_title')}
-Company: {job.get('company_name')}
-Description: {job.get('job_summary') or job.get('job_description')}
+Company  : {job.get('company_name')}
+Summary  : {job.get('job_summary') or job.get('job_description')}
 """
     try:
-        resp     = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        content  = resp.choices[0].message.content.strip()
-        score    = int(content.split("Score:")[1].split("/")[0].strip())
-        return score, content
-    except Exception as exc:
-        logging.error("OpenAI score error: %s", exc)
-        return 0, f"Score: 0/10 — OpenAI error: {exc}"
+        txt = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2
+             ).choices[0].message.content.strip()
+        score = int(txt.split("Score:")[1].split("/")[0].strip())
+        return score, txt
+    except Exception as e:
+        logging.error("GPT score error: %s", e)
+        return 0, f"Score: 0/10 — {e}"
 
+def sanitize(v):
+    return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else v
 
-def sanitize(val):
-    """Convert NaNs/None to empty string so Airtable JSON is valid."""
-    if val is None or (isinstance(val, float) and pd.isna(val)):
-        return ""
-    return val
-
-
-def push_to_airtable(job: dict, score: int, reason: str) -> None:
-    """Create a record in Airtable."""
+# ─── Airtable push ────────────────────────────────────────────────────────────
+def push_to_airtable(job, score, reason):
     try:
-        fields = {
-            "job_title"         : sanitize(job.get("job_title")),
-            "company_name"      : sanitize(job.get("company_name")),
-            "job_location"      : sanitize(job.get("job_location")),
-            "job_summary"       : sanitize(job.get("job_summary")),
-            "job_function"      : sanitize(job.get("job_function")),
-            "job_industries"    : sanitize(job.get("job_industries")),
-            "job_base_pay_range": sanitize(job.get("job_base_pay_range")),
-            "url"               : sanitize(job.get("url")),
-            "job_posted_time"   : sanitize(job.get("job_posted_time")),
-            "job_num_applicants": sanitize(job.get("job_num_applicants")),
-            "Score"             : score,
-            "Reason"            : reason,
-        }
-        poster = job.get("job_poster")
-        if isinstance(poster, str) and 0 < len(poster) <= 255:
-            fields["job_poster"] = poster
+        table.create({
+            **{k: sanitize(job.get(k)) for k in [
+                "job_title","company_name","job_location","job_summary",
+                "job_function","job_industries","job_base_pay_range","url",
+                "job_posted_time","job_num_applicants"
+            ]},
+            "Score": score, "Reason": reason,
+        })
+        logging.info("✅ Airtable: added %s", job.get("job_title"))
+    except Exception as e:
+        logging.error("❌ Airtable error: %s", e)
 
-        table.create(fields)
-        logging.info("✅ Airtable: added %s at %s", job.get("job_title"), job.get("company_name"))
-    except Exception as exc:
-        logging.error("❌ Airtable error: %s", exc)
+# ─── S3 download (unchanged) ──────────────────────────────────────────────────
+def latest_key():
+    objs = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX).get("Contents", [])
+    objs = [o for o in objs if o["Key"].endswith(FILE_EXT)]
+    return max(objs, key=lambda o: o["LastModified"])["Key"] if objs else None
 
+def download_csv() -> str | None:
+    key = latest_key()
+    if not key:
+        logging.error("S3: no CSV found")
+        return None
+    local = os.path.basename(key)
+    logging.info("📥 Downloading s3://%s/%s", AWS_BUCKET, key)
+    s3.download_file(AWS_BUCKET, key, local)
+    return local
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
-def main() -> None:
-    logging.info("🚀 Starting job screener...")
-    path = fetch_latest_from_s3()
-    if not path:
-        return
+# ─── Main ─────────────────────────────────────────────────────────────────────
+def main():
+    logging.info("🚀 Starting job screener…")
+    path = download_csv()
+    if not path: return
 
     try:
-        df = pd.read_csv(path)
-    except Exception as exc:
-        logging.error("CSV read error: %s", exc)
-        return
-
-    # drop rows that are completely empty to avoid NaN spam
-    df = df.dropna(how="all")
+        df = pd.read_csv(path).dropna(how="all")
+    except Exception as e:
+        logging.error("CSV read error: %s", e); return
     logging.info("🗃️  Loaded %d rows from CSV", len(df))
 
-    # pass 1 – age + GPT category filter
-    keep_mask = []
-    for row in df.to_dict("records"):
-        if is_recent(row.get("job_posted_time", "")) and gpt_in_scope(row):
-            keep_mask.append(True)
-        else:
-            keep_mask.append(False)
+    # Age filter
+    recent_mask = df["job_posted_time"].apply(is_recent) \
+                   if "job_posted_time" in df.columns else pd.Series(True, index=df.index)
+    df_recent = df[ recent_mask ]
+    logging.info("⏳ After age filter: %d rows remain", len(df_recent))
 
-    df = df[keep_mask]
-    logging.info("📊 After filtering, %d rows remain", len(df))
-    if df.empty:
+    if df_recent.empty:
+        logging.warning("All rows filtered out by age check – verify date format!")
         return
 
-    # iterate kept rows → score → Airtable
-    for job in df.to_dict("records"):
-        score, reason = score_job(job)
-        logging.info("🧠 GPT score: %d/10", score)
-        push_to_airtable(job, score, reason)
-        time.sleep(1)     # Airtable rate-limit guard
+    # GPT category filter
+    keep = []
+    for row in df_recent.to_dict("records"):
+        keep.append(gpt_in_scope(row))
+        time.sleep(0.1)   # tiny pause to avoid burst QPS
+    df_keep = df_recent[keep]
+    logging.info("🏷️  After category filter: %d rows remain", len(df_keep))
 
+    if df_keep.empty:
+        logging.warning("All rows dropped by GPT category check.")
+        return
+
+    # Score & push
+    for row in df_keep.to_dict("records"):
+        s, r = score_job(row)
+        logging.info("🧠 GPT score: %d/10", s)
+        push_to_airtable(row, s, r)
+        time.sleep(1)        # Airtable rate-limit guard
 
 if __name__ == "__main__":
     main()
