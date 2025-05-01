@@ -1,190 +1,141 @@
 #!/usr/bin/env python3
-# ============================================================================
-# main.py – robust date parsing + progress logging + GPT category filter
-# ============================================================================
+# ─────────────────────────────────────────────────────────────────────────────
+#  Bright-Data Job Screener  ▸  pushes selected jobs to Airtable
+#  • Category filter:   AI Expertise, Machine Learning, Data Science, etc.
+#  • Relevance score:   #matched-keywords in title + description
+#  • Age filter:        *DISABLED*  (no “< 7 days” check)
+# ─────────────────────────────────────────────────────────────────────────────
 
-import os, time, logging
-from datetime import datetime, timezone, timedelta
+import csv
+import logging
+import os
+import re
+from pathlib import Path
+from typing import List
 
-import boto3
 import pandas as pd
 from pyairtable import Table
-from openai import OpenAI
+from pyairtable.formulas import match
 
-# ─── Configuration (unchanged) ────────────────────────────────────────────────
+# ── config ───────────────────────────────────────────────────────────────────
+CSV_URI              = os.getenv("CSV_URI")              # e.g. s3://bucket/file.csv
 AIRTABLE_TOKEN       = os.getenv("AIRTABLE_TOKEN")
 AIRTABLE_BASE_ID     = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_TABLE_NAME  = os.getenv("AIRTABLE_TABLE_NAME")
+MAX_ROWS             = int(os.getenv("MAX_ROWS", 100))   # safety-valve
 
-AWS_ACCESS_KEY       = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_KEY       = os.getenv("AWS_SECRET_ACCESS_KEY")
-AWS_BUCKET           = os.getenv("AWS_BUCKET_NAME")
-AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")
-
-S3_PREFIX            = os.getenv("S3_PREFIX", "")
-FILE_EXT             = ".csv"
-
-MAX_AGE_DAYS = 7
-ALLOWED_CATEGORIES = [
-    "AI Expertise", "Machine Learning", "Data Science", "Data Analytics",
-    "Visualization", "Data Governance", "Engineering",
+CATEGORIES: List[str] = [
+    "AI Expertise",
+    "Machine Learning",
+    "Data Science",
+    "Data Analytics",
+    "Visualization",
+    "Data Governance",
+    "Engineering",
 ]
 
-assert all([AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME,
-            AWS_ACCESS_KEY,  AWS_SECRET_KEY,  AWS_BUCKET]), \
-       "🔑 Missing required environment variables"
+CATEGORY_REGEX = re.compile("|".join(
+    [re.escape(c) for c in CATEGORIES if c.strip()]), flags=re.I)
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
-# ─── External clients ────────────────────────────────────────────────────────
-client = OpenAI()
-table  = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-s3     = boto3.client(
-           "s3", region_name=AWS_REGION,
-           aws_access_key_id=AWS_ACCESS_KEY,
-           aws_secret_access_key=AWS_SECRET_KEY,
-         )
+# ── helpers ──────────────────────────────────────────────────────────────────
+def download_csv(uri: str, dest: Path) -> Path:
+    """Very thin wrapper – works for local paths or pre-mounted cloud URIs."""
+    if uri.startswith(("http://", "https://", "s3://")):
+        import boto3, botocore  # only used when really needed
+        if uri.startswith("s3://"):
+            s3 = boto3.client("s3")
+            bucket, key = uri[5:].split("/", 1)
+            s3.download_file(bucket, key, str(dest))
+        else:  # https://
+            import requests
+            r = requests.get(uri, timeout=30)
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+    else:
+        dest = Path(uri).expanduser().resolve()
+    return dest
 
-# ─── Helper: robust date parse ───────────────────────────────────────────────
-def parse_date(val: str):
-    """
-    Try ISO / RFC / epoch-seconds.  Return pd.Timestamp(UTC) or NaT.
-    """
-    if pd.isna(val) or not str(val).strip():
-        return pd.NaT
-    txt = str(val).strip()
-    # epoch?
-    if txt.isdigit():
-        try:
-            return pd.to_datetime(int(txt), unit="s", utc=True)
-        except Exception:
-            pass
-    # fall back to pandas flexible parser
-    return pd.to_datetime(txt, utc=True, errors="coerce")
 
-def is_recent(val) -> bool:
-    ts = parse_date(val)
-    if ts is pd.NaT:
-        return False
-    return (datetime.now(timezone.utc) - ts) <= timedelta(days=MAX_AGE_DAYS)
+def relevant(row) -> int:
+    """Relevance score = matched keywords in title + description."""
+    text = f"{row.get('job_title','')} {row.get('job_description','')}".lower()
+    return sum(k.lower() in text for k in CATEGORIES)
 
-# ─── GPT helpers (unchanged logic) ────────────────────────────────────────────
-def gpt_in_scope(job: dict) -> bool:
-    prompt = f"""Reply only "yes" or "no". Does this job fit ANY of these?
-{", ".join(ALLOWED_CATEGORIES)}.
 
-Title: {job.get('job_title')}
-Summary: {job.get('job_summary')}
-"""
-    try:
-        ans = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0
-        ).choices[0].message.content.strip().lower()
-        return ans.startswith("y")
-    except Exception as e:
-        logging.error("GPT filter error (keeping row): %s", e)
-        return True
+def push_to_airtable(table: Table, row: pd.Series):
+    """Insert or update by external ID (job_posting_id if present)."""
+    record = {
+        "Job Title": row.get("job_title"),
+        "Company": row.get("company_name"),
+        "Location": row.get("job_location"),
+        "Posted": row.get("job_posted_time"),
+        "Relevance": row.get("relevance"),
+        "Apply Link": row.get("apply_link") or row.get("url"),
+    }
+    ext_id = str(row.get("job_posting_id") or row.get("url"))
+    # upsert
+    existing = table.first(formula=match({"External ID": ext_id}))
+    record["External ID"] = ext_id
+    if existing:
+        table.update(existing["id"], record)
+    else:
+        table.create(record)
 
-def score_job(job: dict) -> tuple[int, str]:
-    prompt = f"""Rate 1-10 on relevance to: {", ".join(ALLOWED_CATEGORIES)}.
-One line: "Score: X/10 — Reason".
-Job title: {job.get('job_title')}
-Company  : {job.get('company_name')}
-Summary  : {job.get('job_summary') or job.get('job_description')}
-"""
-    try:
-        txt = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2
-             ).choices[0].message.content.strip()
-        score = int(txt.split("Score:")[1].split("/")[0].strip())
-        return score, txt
-    except Exception as e:
-        logging.error("GPT score error: %s", e)
-        return 0, f"Score: 0/10 — {e}"
 
-def sanitize(v):
-    return "" if (v is None or (isinstance(v, float) and pd.isna(v))) else v
-
-# ─── Airtable push ────────────────────────────────────────────────────────────
-def push_to_airtable(job, score, reason):
-    try:
-        table.create({
-            **{k: sanitize(job.get(k)) for k in [
-                "job_title","company_name","job_location","job_summary",
-                "job_function","job_industries","job_base_pay_range","url",
-                "job_posted_time","job_num_applicants"
-            ]},
-            "Score": score, "Reason": reason,
-        })
-        logging.info("✅ Airtable: added %s", job.get("job_title"))
-    except Exception as e:
-        logging.error("❌ Airtable error: %s", e)
-
-# ─── S3 download (unchanged) ──────────────────────────────────────────────────
-def latest_key():
-    objs = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX).get("Contents", [])
-    objs = [o for o in objs if o["Key"].endswith(FILE_EXT)]
-    return max(objs, key=lambda o: o["LastModified"])["Key"] if objs else None
-
-def download_csv() -> str | None:
-    key = latest_key()
-    if not key:
-        logging.error("S3: no CSV found")
-        return None
-    local = os.path.basename(key)
-    logging.info("📥 Downloading s3://%s/%s", AWS_BUCKET, key)
-    s3.download_file(AWS_BUCKET, key, local)
-    return local
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
+# ── main ─────────────────────────────────────────────────────────────────────
 def main():
     logging.info("🚀 Starting job screener…")
-    path = download_csv()
-    if not path: return
+    tmp_csv = download_csv(CSV_URI, Path("/tmp/jobs.csv"))
+    df = pd.read_csv(tmp_csv).fillna("")
 
-    try:
-        df = pd.read_csv(path).dropna(how="all")
-    except Exception as e:
-        logging.error("CSV read error: %s", e); return
-    logging.info("🗃️  Loaded %d rows from CSV", len(df))
+    logging.info("📊 Loaded %d rows from CSV", len(df))
 
-    # Age filter
-    recent_mask = df["job_posted_time"].apply(is_recent) \
-                   if "job_posted_time" in df.columns else pd.Series(True, index=df.index)
-    df_recent = df[ recent_mask ]
-    logging.info("⏳ After age filter: %d rows remain", len(df_recent))
+    # 1️⃣ CATEGORY FILTER ------------------------------------------------------
+    # candidate text to search
+    text = (
+        df["job_title"].astype(str)
+        + " " +
+        df.get("job_description", "").astype(str)
+    )
+    mask = text.str.contains(CATEGORY_REGEX, na=False)
+    df = df[mask]
+    logging.info("🔍 After category filter: %d rows remain", len(df))
 
-    if df_recent.empty:
-        logging.warning("All rows filtered out by age check – verify date format!")
+    if df.empty:
+        logging.warning("⚠️  No rows matched the category list – exiting.")
         return
 
-    # GPT category filter
-    keep = []
-    for row in df_recent.to_dict("records"):
-        keep.append(gpt_in_scope(row))
-        time.sleep(0.1)   # tiny pause to avoid burst QPS
-    df_keep = df_recent[keep]
-    logging.info("🏷️  After category filter: %d rows remain", len(df_keep))
+    # 2️⃣ RELEVANCE SCORE ------------------------------------------------------
+    df["relevance"] = df.apply(relevant, axis=1)
+    df = df[df["relevance"] > 0]
 
-    if df_keep.empty:
-        logging.warning("All rows dropped by GPT category check.")
+    if df.empty:
+        logging.warning("⚠️  All rows scored 0 relevance – exiting.")
         return
 
-    # Score & push
-    for row in df_keep.to_dict("records"):
-        s, r = score_job(row)
-        logging.info("🧠 GPT score: %d/10", s)
-        push_to_airtable(row, s, r)
-        time.sleep(1)        # Airtable rate-limit guard
+    df = df.sort_values(
+        ["relevance", "job_posted_time"],
+        ascending=[False, False]
+    ).head(MAX_ROWS)
+
+    # 3️⃣ PUSH TO AIRTABLE -----------------------------------------------------
+    table = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
+    pushed = 0
+    for _, row in df.iterrows():
+        try:
+            push_to_airtable(table, row)
+            pushed += 1
+        except Exception as exc:
+            logging.error("Failed to push row (%s): %s", row.get("job_title"), exc)
+
+    logging.info("✅ Finished – %d records synced to Airtable", pushed)
+
 
 if __name__ == "__main__":
     main()
