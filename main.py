@@ -1,126 +1,195 @@
 #!/usr/bin/env python3
-import os
-import csv
+"""
+main.py
+-------
+
+Cron-style script that
+
+1. finds the most-recent job CSV in an S3 bucket/prefix
+2. downloads it
+3. filters by category keywords
+4. ranks remaining rows by “relevancy score”
+5. saves the results locally (or wherever you like)
+
+Environment variables required
+------------------------------
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_REGION              – e.g. "us-east-1"
+S3_BUCKET               – e.g. "brightdata-job-screener"
+S3_PREFIX               – e.g. "daily_exports/"   (include trailing slash!)
+CATEGORY_KEYWORDS_JSON  – optional JSON dict of
+                          {category: [kw1, kw2, ...]}
+
+You can keep using Render env-vars, AWS IAM roles, etc.
+"""
+
+from __future__ import annotations
+
+import json
 import logging
-from pathlib import Path
+import os
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Dict, List
 
-import boto3             # pip install boto3
+import boto3
 import pandas as pd
-from pyairtable import Api
-from pyairtable.formulas import match
 
-# -------------------------------
-# CONFIG (env vars or hard-code)
-# -------------------------------
-AWS_REGION         = os.getenv("AWS_REGION", "us-east-1")
-S3_BUCKET          = os.getenv("S3_BUCKET",  "brightdata-job-screener")
-S3_PREFIX          = os.getenv("S3_PREFIX",  "")           # e.g. "exports/"
-AIRTABLE_TOKEN     = os.getenv("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID   = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "Jobs")
-
-CATEGORIES = {
-    "ai expertise", "machine learning", "data science",
-    "data analytics", "visualization", "data governance",
-    "engineering"
-}
-# lower-cased for case-insensitive matching
-# -------------------------------
+# --------------------------------------------------------------------------- #
+#  Logging                                                                    #
+# --------------------------------------------------------------------------- #
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
+log = logging.getLogger(__name__)
 
-# ---------- S3 HELPERS ---------- #
-def latest_csv_from_s3(bucket: str, prefix: str = "") -> str:
-    """Return S3 URI (s3://bucket/key) of the latest .csv file under prefix."""
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    paginator = s3.get_paginator("list_objects_v2")
+# --------------------------------------------------------------------------- #
+#  Config                                                                     #
+# --------------------------------------------------------------------------- #
+
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+S3_BUCKET = os.environ["S3_BUCKET"]
+S3_PREFIX = os.getenv("S3_PREFIX", "")
+
+# default category → keyword mapping; override with env-var if you like
+DEFAULT_CATS: Dict[str, List[str]] = {
+    "Data Engineering": [
+        "data engineer",
+        "etl",
+        "big data",
+        "spark",
+        "hadoop",
+        "redshift",
+        "data warehouse",
+    ],
+    "Machine Learning": [
+        "machine learning",
+        "ml",
+        "tensorflow",
+        "pytorch",
+        "scikit",
+        "deep learning",
+        "llm",
+        "nlp",
+        "computer vision",
+    ],
+    "Analytics / BI": [
+        "analytics",
+        "business intelligence",
+        "bi",
+        "power bi",
+        "tableau",
+        "lookml",
+        "dashboards",
+        "insights",
+    ],
+}
+
+CATEGORY_KEYWORDS: Dict[str, List[str]] = DEFAULT_CATS
+if "CATEGORY_KEYWORDS_JSON" in os.environ:
+    try:
+        CATEGORY_KEYWORDS = json.loads(os.environ["CATEGORY_KEYWORDS_JSON"])
+    except Exception:
+        log.warning("Could not parse CATEGORY_KEYWORDS_JSON – falling back to default")
+
+OUT_FILE = Path("/tmp/filtered_jobs.csv")
+
+# --------------------------------------------------------------------------- #
+#  Helpers                                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def s3_client():
+    return boto3.client("s3", region_name=AWS_REGION)
+
+
+def latest_object(bucket: str, prefix: str) -> dict | None:
+    """
+    Return the S3 object metadata for the newest key under the prefix.
+    """
+    paginator = s3_client().get_paginator("list_objects_v2")
     newest = None
-
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if not key.lower().endswith(".csv"):
-                continue
-            if (newest is None) or (obj["LastModified"] > newest["LastModified"]):
+            if newest is None or obj["LastModified"] > newest["LastModified"]:
                 newest = obj
-
-    if newest is None:
-        raise RuntimeError(f"No CSV files found in s3://{bucket}/{prefix}")
-
-    key = newest["Key"]
-    logging.info("📄 Latest CSV detected: s3://%s/%s (modified %s)",
-                 bucket, key, newest["LastModified"])
-    return f"s3://{bucket}/{key}"
+    return newest
 
 
-def download_s3_uri(s3_uri: str, dest: Path) -> Path:
-    """Download the given s3:// URI to dest and return dest."""
-    if not s3_uri.startswith("s3://"):
-        raise ValueError("download_s3_uri expects an s3:// URI")
+def download_to_tmp(bucket: str, key: str, local: Path) -> Path:
+    local.parent.mkdir(parents=True, exist_ok=True)
+    log.info("⬇️  Downloading s3://%s/%s → %s", bucket, key, local)
+    s3_client().download_file(bucket, key, str(local))
+    return local
 
-    bucket, key = s3_uri[5:].split("/", 1)
-    s3 = boto3.client("s3", region_name=AWS_REGION)
-    s3.download_file(bucket, key, str(dest))
-    logging.info("⬇️  Downloaded %s to %s", s3_uri, dest)
-    return dest
 
-# ---------- FILTER / RANK ---------- #
-def relevant(row: pd.Series) -> bool:
-    """Return True if the job row belongs to a desired category."""
-    title = str(row.get("job_title", "")).lower()
-    category = str(row.get("job_category", "")).lower()
-    combined = f"{title} {category}"
-    return any(term in combined for term in CATEGORIES)
+def load_csv(fp: Path) -> pd.DataFrame:
+    log.info("📄  Loading %s ...", fp)
+    return pd.read_csv(fp)
 
-def rank(df: pd.DataFrame) -> pd.DataFrame:
-    """Simple relevancy rank: # of category keywords appearing in title+category."""
-    def score_row(row):
-        text = f"{row.get('job_title','')} {row.get('job_category','')}".lower()
-        return sum(term in text for term in CATEGORIES)
 
-    df["score"] = df.apply(score_row, axis=1)
-    return df.sort_values("score", ascending=False)
+def score_row(row: pd.Series, kw_map: Dict[str, List[str]]) -> int:
+    """
+    Simple relevancy score: +1 for each keyword match (case-insensitive).
+    """
+    haystack = " ".join(str(v).lower() for v in row.astype(str).values)
+    score = 0
+    for kws in kw_map.values():
+        for kw in kws:
+            if kw.lower() in haystack:
+                score += 1
+    return score
 
-# ---------- MAIN ---------- #
-def main():
-    logging.info("🚀 Starting job screener…")
 
-    # 1. Find latest CSV and download
-    latest_uri = latest_csv_from_s3(S3_BUCKET, S3_PREFIX)
-    tmp_csv = download_s3_uri(latest_uri, Path("/tmp/jobs.csv"))
+def filter_and_rank(df: pd.DataFrame) -> pd.DataFrame:
+    # Keep rows with at least one category keyword
+    def is_relevant(row: pd.Series) -> bool:
+        return score_row(row, CATEGORY_KEYWORDS) > 0
 
-    # 2. Load
-    df = pd.read_csv(tmp_csv)
-    logging.info("📥 Loaded %d rows from CSV", len(df))
+    log.info("🔍  Filtering by category keywords …")
+    filtered = df[df.apply(is_relevant, axis=1)].copy()
+    if filtered.empty:
+        log.warning("No rows matched category keywords!")
+        return filtered
 
-    # 3. Filter
-    df = df[df.apply(relevant, axis=1)]
-    logging.info("🔍 After category filter: %d rows remain", len(df))
+    # Add score column & sort descending
+    filtered["score"] = filtered.apply(
+        lambda r: score_row(r, CATEGORY_KEYWORDS), axis=1
+    )
+    filtered = filtered.sort_values("score", ascending=False)
+    log.info("✅  %d rows remain after filtering", len(filtered))
+    return filtered
 
-    if df.empty:
-        logging.warning("No matching rows – exiting.")
-        return
 
-    df = rank(df)
+# --------------------------------------------------------------------------- #
+#  Main                                                                       #
+# --------------------------------------------------------------------------- #
 
-    # 4. Push to Airtable
-    table = Api(AIRTABLE_TOKEN).table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
-    for _, row in df.iterrows():
-        record = {
-            "Job Title": row.get("job_title"),
-            "Company": row.get("company_name"),
-            "Location": row.get("job_location"),
-            "Posted": row.get("job_posted_date"),
-            "Source": row.get("apply_link"),
-            "Relevancy Score": int(row["score"]),
-        }
-        table.create(record)
-        logging.info("✅ Airtable: added %s", record["Job Title"])
+def main() -> None:
+    log.info("🚀 Starting job screener…")
+
+    newest_obj = latest_object(S3_BUCKET, S3_PREFIX)
+    if not newest_obj:
+        log.error("No objects found under s3://%s/%s", S3_BUCKET, S3_PREFIX)
+        sys.exit(1)
+
+    key = newest_obj["Key"]
+    tmp_csv = download_to_tmp(S3_BUCKET, key, Path("/tmp/jobs_raw.csv"))
+
+    df = load_csv(tmp_csv)
+    filtered = filter_and_rank(df)
+
+    if not filtered.empty:
+        filtered.to_csv(OUT_FILE, index=False)
+        log.info("💾  Saved %d rows → %s", len(filtered), OUT_FILE)
+    else:
+        log.info("No rows to save – exiting gracefully.")
+
 
 if __name__ == "__main__":
     main()
