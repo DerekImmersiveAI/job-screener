@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 # ────────────────────────────────────────────────────────────────────────────────
 # main.py – download the newest jobs file from S3, score each job with GPT-4,
-#            then push the results to Airtable.
+#            then push the results to Airtable – **only for allowed categories**.
 # ────────────────────────────────────────────────────────────────────────────────
 import os
 import time
-import json
 import logging
-from datetime import datetime
-
 import boto3
 import pandas as pd
 from pyairtable import Table
@@ -44,10 +41,29 @@ table  = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)  # Airtabl
 
 s3 = boto3.client(
     "s3",
-    region_name      = AWS_REGION,
-    aws_access_key_id= AWS_ACCESS_KEY,
+    region_name           = AWS_REGION,
+    aws_access_key_id     = AWS_ACCESS_KEY,
     aws_secret_access_key = AWS_SECRET_KEY,
 )
+
+# ─── Category filter ───────────────────────────────────────────────────────────
+ALLOWED_CATEGORIES = [
+    "machine learning",
+    "data science",
+    "data analytics",
+    "visualization",
+    "data governance",
+    "engineering",
+    "product management",
+]
+
+def is_allowed(job: dict) -> bool:
+    """
+    Return True if the job’s function OR its title contains one of the allowed
+    buckets (case-insensitive substring match).
+    """
+    text = (job.get("job_function") or job.get("job_title") or "").lower()
+    return any(bucket in text for bucket in ALLOWED_CATEGORIES)
 
 # ─── Helpers ───────────────────────────────────────────────────────────────────
 def fetch_latest_from_s3() -> str | None:
@@ -78,7 +94,7 @@ def fetch_latest_from_s3() -> str | None:
 
 def score_job(job: dict) -> tuple[int, str]:
     """
-    Ask GPT-4 to rate the job. Returns (score, full-text-reason).
+    Ask GPT-4 to rate the job. Returns (score, full-text reason).
     """
     prompt = f"""
 You are an AI job screener. Rate this job on a scale from 1 to 10 based on:
@@ -105,7 +121,8 @@ Reason: [short reason]
             temperature=0.2,
         )
         content    = resp.choices[0].message.content.strip()
-        score_line = next((ln for ln in content.splitlines() if "Score" in ln), "Score: 0/10")
+        score_line = next((ln for ln in content.splitlines() if "Score" in ln),
+                          "Score: 0/10")
         score      = int(score_line.split(":")[1].split("/")[0].strip())
         return score, content
 
@@ -175,7 +192,7 @@ def main() -> None:
         logging.error("CSV read error: %s", exc)
         return
 
-    # ── Clean dataframe ───────────────────────────────────────────────────────
+    # Clean dataframe
     df = df.dropna(how="all")                         # remove completely blank rows
     df = df.dropna(subset=["job_title", "company_name"])  # require these two cols
 
@@ -183,6 +200,11 @@ def main() -> None:
 
     # Iterate rows → GPT score → Airtable
     for job in df.to_dict("records"):
+        if not is_allowed(job):
+            logging.info("⏭️  Skipped (out-of-scope): %s – %s",
+                         job.get("job_title"), job.get("company_name"))
+            continue
+
         score, reason = score_job(job)
         logging.info("🧠 GPT score: %d/10", score)
         push_to_airtable(job, score, reason)
