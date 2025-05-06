@@ -9,42 +9,75 @@ import boto3, pandas as pd
 from pyairtable import Table
 from openai import OpenAI
 
-# ─── Owner lookup ──────────────────────────────────────────────────────────────
-# Normalise company names to lower-case, no punctuation/spaces you care about.
-ACCOUNT_OWNER = {
-    # ── Henry Hartmann ───────────────────────────────────────────────────────
-    "directv":                "Henry Hartmann",
-    "the walt disney company": "Henry Hartmann",
-    "espn":                    "Henry Hartmann",
-    "siriusxm":                "Henry Hartmann",
-    "electronic arts":         "Henry Hartmann",
-    "nbcuniversal":            "Henry Hartmann",
-    "consumer cellular":       "Henry Hartmann",
-    "us cellular":             "Henry Hartmann",
-    "rockstar games":          "Henry Hartmann",
-    "t-mobile":                "Henry Hartmann",
-    "time warner":             "Henry Hartmann",
-    "horizon media":           "Henry Hartmann",
+# ─── Account-owner lookup ──────────────────────────────────────────────────────
+# We normalise both the dictionary keys **and** the incoming company names:
+#   • all lower-case
+#   • no accents / fancy apostrophes
+#   • minimal punctuation / spaces trimmed
+# Feel free to add more aliases later – just keep them lower-case.
 
-    # ── Chris Vaughan ────────────────────────────────────────────────────────
-    "cox automotive":          "Chris Vaughan",
-    "macy’s":                  "Chris Vaughan",
-    "macy's":                  "Chris Vaughan",   # simple alias example
-    "estee lauder":            "Chris Vaughan",
-    "altice usa":              "Chris Vaughan",
-    "national hockey league":  "Chris Vaughan",
-    "bse global":              "Chris Vaughan",
-    "netflix":                 "Chris Vaughan",
-    "charter/spectrum":        "Chris Vaughan",
-    "spotify":                 "Chris Vaughan",
-    "major league baseball":   "Chris Vaughan",
+OWNER_LOOKUP: dict[str, str] = {
+    # ── Henry Hartmann – Entertainment, Media, Gaming & Telecom ─────────────
+    "directv": "Henry Hartmann",
+    "the walt disney company": "Henry Hartmann", "disney company": "Henry Hartmann",
+    "espn": "Henry Hartmann",
+    "siriusxm": "Henry Hartmann", "sirius xm": "Henry Hartmann",
+    "electronic arts": "Henry Hartmann", "ea": "Henry Hartmann",
+    "nbcuniversal": "Henry Hartmann", "nbc universal": "Henry Hartmann",
+    "consumer cellular": "Henry Hartmann",
+    "us cellular": "Henry Hartmann",
+    "rockstar games": "Henry Hartmann",
+    "t-mobile": "Henry Hartmann", "t mobile": "Henry Hartmann",
+    "time warner": "Henry Hartmann",
+    "horizon media": "Henry Hartmann",
+    "zynga": "Henry Hartmann",
+    "marketing management analytics": "Henry Hartmann", "mma": "Henry Hartmann",
+    "ogilvy": "Henry Hartmann",
+    "rush street interactive": "Henry Hartmann",
+    "e w scripps": "Henry Hartmann", "scripps": "Henry Hartmann",
+    "madison square garden": "Henry Hartmann", "msg entertainment": "Henry Hartmann",
+    "quad": "Henry Hartmann",
+    "nielsen": "Henry Hartmann",
+    "1-800-flowers": "Henry Hartmann", "1 800 flowers": "Henry Hartmann",
 
- # ── Doug Leininger ───────────────────────────────────────────
-    "walgreens": "Doug Leininger",
-    "walgreens boots": "Doug Leininger",
-    "hcsc": "Doug Leininger",
-    "elevance": "Doug Leininger",
-    "anthem": "Doug Leininger",
+    # ── Chris Vaughan – Entertainment, Media, Gaming & Telecom ──────────────
+    "cox automotive": "Chris Vaughan",
+    "macy’s": "Chris Vaughan", "macys": "Chris Vaughan", "macy's": "Chris Vaughan",
+    "estee lauder": "Chris Vaughan",
+    "altice usa": "Chris Vaughan", "altice": "Chris Vaughan",
+    "national hockey league": "Chris Vaughan", "nhl": "Chris Vaughan",
+    "bse global": "Chris Vaughan",
+    "netflix": "Chris Vaughan",
+    "charter": "Chris Vaughan", "spectrum": "Chris Vaughan",
+    "spotify": "Chris Vaughan",
+    "major league baseball": "Chris Vaughan", "mlb": "Chris Vaughan",
+
+    # ── Steve Lukaszewski – Healthcare & Life Sciences ──────────────────────
+    "cvs health": "Steve Lukaszewski",
+    "blue cross blue shield": "Steve Lukaszewski", "bcbs": "Steve Lukaszewski",
+    "astellas": "Steve Lukaszewski",
+    "abbott": "Steve Lukaszewski", "abbvie": "Steve Lukaszewski",
+    "piedmont": "Steve Lukaszewski",
+    "pfizer": "Steve Lukaszewski",
+    "astrazeneca": "Steve Lukaszewski",
+    "ecolab": "Steve Lukaszewski",
+    "amgen": "Steve Lukaszewski", "horizon therapeutics": "Steve Lukaszewski",
+    "shore capital": "Steve Lukaszewski",
+    "unc healthcare": "Steve Lukaszewski", "unc health": "Steve Lukaszewski",
+    "ssm": "Steve Lukaszewski",
+    "wellstar": "Steve Lukaszewski",
+    "lundbeck": "Steve Lukaszewski",
+    "generac": "Steve Lukaszewski",
+    "univar": "Steve Lukaszewski",
+    "takeda": "Steve Lukaszewski", "shire": "Steve Lukaszewski",
+    "zurich insurance": "Steve Lukaszewski",
+    "bon secours": "Steve Lukaszewski",
+    "roak capital": "Steve Lukaszewski",
+
+    # ── Doug Leininger – Healthcare, Life Sciences, Insurance ───────────────
+    "walgreens": "Doug Leininger", "walgreens boots": "Doug Leininger",
+    "hcsc": "Doug Leininger", "blue cross il": "Doug Leininger",
+    "elevance": "Doug Leininger", "anthem": "Doug Leininger",
     "ge healthcare": "Doug Leininger",
     "medical mutual": "Doug Leininger",
     "ohio health": "Doug Leininger",
@@ -54,7 +87,7 @@ ACCOUNT_OWNER = {
     "cincinnati children": "Doug Leininger",
     "erie insurance": "Doug Leininger",
     "medline": "Doug Leininger",
-    "great american insurance": "Doug Leininger",
+    "great american insurance": "Doug Leininger", "gaig": "Doug Leininger",
     "nationwide": "Doug Leininger",
     "medpace": "Doug Leininger",
     "caring communities": "Doug Leininger",
@@ -63,16 +96,16 @@ ACCOUNT_OWNER = {
     "optum": "Doug Leininger",
     "uw health": "Doug Leininger",
 
-    # ── Scott Patterson ──────────────────────────────────────────
+    # ── Scott Patterson – Financial Services & Insurance ────────────────────
     "keybank": "Scott Patterson",
-    "new york life": "Scott Patterson",
-    "nyl": "Scott Patterson",
+    "new york life": "Scott Patterson", "nyl": "Scott Patterson",
     "allstate": "Scott Patterson",
-    "m&t bank": "Scott Patterson",
+    "m&t bank": "Scott Patterson", "mt bank": "Scott Patterson",
     "bmo": "Scott Patterson",
     "vanguard": "Scott Patterson",
     "guardian life": "Scott Patterson",
     "hanover": "Scott Patterson",
+    "erie insurance": "Scott Patterson",
     "massmutual": "Scott Patterson",
     "fhlb": "Scott Patterson",
     "cincinnati financial": "Scott Patterson",
@@ -84,19 +117,16 @@ ACCOUNT_OWNER = {
     "delta community credit": "Scott Patterson",
     "percheron": "Scott Patterson",
 
-    # ── Palmer Karsh ────────────────────────────────────────────
+    # ── Palmer Karsh – Retail, CPG, Consulting, Real Estate ─────────────────
     "abercrombie": "Palmer Karsh",
     "pilot ": "Palmer Karsh",
     "southern glazer": "Palmer Karsh",
-    "kroger": "Palmer Karsh",
-    "84.51": "Palmer Karsh",
+    "kroger": "Palmer Karsh", "84.51": "Palmer Karsh",
     "michelin": "Palmer Karsh",
     "energizer": "Palmer Karsh",
     "kohl": "Palmer Karsh",
-    "procter & gamble": "Palmer Karsh",
-    "p&g": "Palmer Karsh",
-    "wendy": "Palmer Karsh",
-    "arby": "Palmer Karsh",
+    "procter & gamble": "Palmer Karsh", "p&g": "Palmer Karsh",
+    "wendy": "Palmer Karsh", "arby": "Palmer Karsh",
     "bob evans": "Palmer Karsh",
     "drt ": "Palmer Karsh",
     "black book": "Palmer Karsh",
@@ -106,11 +136,10 @@ ACCOUNT_OWNER = {
     "thrivent": "Palmer Karsh",
     "fifth third": "Palmer Karsh",
     "paycor": "Palmer Karsh",
-    "gaig": "Palmer Karsh",
     "penn foster": "Palmer Karsh",
 
-    # ── Paul Ferri ───────────────────────────────────────────────
-    "disney": "Paul Ferri",
+    # ── Paul Ferri – Technology, Law, Manufacturing, MSP ────────────────────
+    "disney ": "Paul Ferri",   # MSP side
     "ulta": "Paul Ferri",
     "belkin": "Paul Ferri",
     "intel": "Paul Ferri",
@@ -126,23 +155,25 @@ ACCOUNT_OWNER = {
     "rakuten": "Paul Ferri",
     "id.me": "Paul Ferri",
     "intuit": "Paul Ferri",
-    "meta": "Paul Ferri",
-    "facebook": "Paul Ferri",
+    "meta": "Paul Ferri", "facebook": "Paul Ferri",
     "fetch rewards": "Paul Ferri",
     "apple": "Paul Ferri",
     "vivid seats": "Paul Ferri",
 }
 
-# ------------------------------------------------------------------
-def get_owner(company: str) -> str:
-    """Return AE name or ''."""
-    c = (company or "").lower()
-    for key, owner in OWNER_LOOKUP.items():
-        if key in c:
+# ---------------------------------------------------------------------------
+def assign_owner(company: str | None) -> str | None:
+    """
+    Return the Account Executive’s name for a company, or None when unknown.
+    """
+    if not company:
+        return None
+    c = company.casefold()
+    for alias, owner in OWNER_LOOKUP.items():
+        if alias in c:
             return owner
-    return ""
+    return None
 
-    # Example for “Unassigned” bucket – simply omit from dict; script will leave blank
 
 
 # ─── Environment / configuration ───────────────────────────────────────────────
