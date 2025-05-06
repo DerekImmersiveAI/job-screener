@@ -1,247 +1,254 @@
 #!/usr/bin/env python3
-# ────────────────────────────────────────────────────────────────────────────────
-# main.py – download latest Bright Data CSV from S3, score each job with GPT-4,
-#           push in-scope jobs to Airtable AND tag with the correct account owner
-# ────────────────────────────────────────────────────────────────────────────────
-import os, time, logging
-from datetime import datetime
-import boto3, pandas as pd
+"""
+Bright Data ➜ Airtable job-screener
+--------------------------------------------------
+ • filters to analytics / data / ML roles
+ • looks up account owner
+ • pushes to Airtable
+"""
+
+import csv, os, logging, pathlib, datetime as dt
 from pyairtable import Table
-from openai import OpenAI
 
-# ─── Owner lookup ──────────────────────────────────────────────────────────────
-# Normalise company names to lower-case, no punctuation/spaces you care about.
-ACCOUNT_OWNER = {
-    # ── Henry Hartmann ───────────────────────────────────────────────────────
-    "directv":                "Henry Hartmann",
-    "the walt disney company": "Henry Hartmann",
-    "espn":                    "Henry Hartmann",
-    "siriusxm":                "Henry Hartmann",
-    "electronic arts":         "Henry Hartmann",
-    "nbcuniversal":            "Henry Hartmann",
-    "consumer cellular":       "Henry Hartmann",
-    "us cellular":             "Henry Hartmann",
-    "rockstar games":          "Henry Hartmann",
-    "t-mobile":                "Henry Hartmann",
-    "time warner":             "Henry Hartmann",
-    "horizon media":           "Henry Hartmann",
+# ──────────────────────────────────────────────────────────────────────────────
+#            1.  CONFIG
+# ──────────────────────────────────────────────────────────────────────────────
+AIRTABLE_TOKEN      = os.environ["AIRTABLE_TOKEN"]
+AIRTABLE_BASE_ID    = os.environ["AIRTABLE_BASE_ID"]
+AIRTABLE_TABLE_NAME = os.environ["AIRTABLE_TABLE_NAME"]
+SOURCE_FOLDER       = pathlib.Path("/mnt/data")      # where BrightData CSV lives
 
-    # ── Chris Vaughan ────────────────────────────────────────────────────────
-    "cox automotive":          "Chris Vaughan",
-    "macy’s":                  "Chris Vaughan",
-    "macy's":                  "Chris Vaughan",   # simple alias example
-    "estee lauder":            "Chris Vaughan",
-    "altice usa":              "Chris Vaughan",
-    "national hockey league":  "Chris Vaughan",
-    "bse global":              "Chris Vaughan",
-    "netflix":                 "Chris Vaughan",
-    "charter/spectrum":        "Chris Vaughan",
-    "spotify":                 "Chris Vaughan",
-    "major league baseball":   "Chris Vaughan",
+log = logging.getLogger("job-screener")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 
-    # …KEEP ADDING FOR EVERY AE…
+# ------------------------------------------------------------------
+#  Account-manager lookup  (all keys lower-case)
+# ------------------------------------------------------------------
+OWNER_LOOKUP = {
+    # ── Henry Hartmann ───────────────────────────────────────────
+    "directv": "Henry Hartmann",
+    "walt disney": "Henry Hartmann",
+    "espn": "Henry Hartmann",
+    "siriusxm": "Henry Hartmann",
+    "electronic arts": "Henry Hartmann",
+    "ea ": "Henry Hartmann",
+    "nbcuniversal": "Henry Hartmann",
+    "consumer cellular": "Henry Hartmann",
+    "us cellular": "Henry Hartmann",
+    "rockstar games": "Henry Hartmann",
+    "t-mobile": "Henry Hartmann",
+    "time warner": "Henry Hartmann",
+    "horizon media": "Henry Hartmann",
+    "zynga": "Henry Hartmann",
+    "marketing management analytics": "Henry Hartmann",
+    "mma ": "Henry Hartmann",
+    "ogilvy": "Henry Hartmann",
+    "rush street interactive": "Henry Hartmann",
+    "scripps": "Henry Hartmann",
+    "madison square garden": "Henry Hartmann",
+    "quad ": "Henry Hartmann",
+    "nielsen": "Henry Hartmann",
+    "1-800-flowers": "Henry Hartmann",
 
-    # Example for “Unassigned” bucket – simply omit from dict; script will leave blank
+    # ── Chris Vaughan ────────────────────────────────────────────
+    "cox automotive": "Chris Vaughan",
+    "macy": "Chris Vaughan",
+    "estee lauder": "Chris Vaughan",
+    "altice": "Chris Vaughan",
+    "national hockey league": "Chris Vaughan",
+    "nhl": "Chris Vaughan",
+    "bse global": "Chris Vaughan",
+    "netflix": "Chris Vaughan",
+    "charter": "Chris Vaughan",
+    "spectrum": "Chris Vaughan",
+    "spotify": "Chris Vaughan",
+    "major league baseball": "Chris Vaughan",
+    "mlb": "Chris Vaughan",
+
+    # ── Steve Lukaszewski ────────────────────────────────────────
+    "cvs health": "Steve Lukaszewski",
+    "blue cross": "Steve Lukaszewski",
+    "astellas": "Steve Lukaszewski",
+    "abbott": "Steve Lukaszewski",
+    "abbvie": "Steve Lukaszewski",
+    "piedmont": "Steve Lukaszewski",
+    "pfizer": "Steve Lukaszewski",
+    "astrazeneca": "Steve Lukaszewski",
+    "ecolab": "Steve Lukaszewski",
+    "amgen": "Steve Lukaszewski",
+    "horizon therapeutics": "Steve Lukaszewski",
+    "shore capital": "Steve Lukaszewski",
+    "unc healthcare": "Steve Lukaszewski",
+    "ssm ": "Steve Lukaszewski",
+    "wellstar": "Steve Lukaszewski",
+    "lundbeck": "Steve Lukaszewski",
+    "generac": "Steve Lukaszewski",
+    "univar": "Steve Lukaszewski",
+    "takeda": "Steve Lukaszewski",
+    "shire": "Steve Lukaszewski",
+    "zurich": "Steve Lukaszewski",
+    "bon secours": "Steve Lukaszewski",
+    "roak capital": "Steve Lukaszewski",
+
+    # ── Doug Leininger ───────────────────────────────────────────
+    "walgreens": "Doug Leininger",
+    "walgreens boots": "Doug Leininger",
+    "hcsc": "Doug Leininger",
+    "elevance": "Doug Leininger",
+    "anthem": "Doug Leininger",
+    "ge healthcare": "Doug Leininger",
+    "medical mutual": "Doug Leininger",
+    "ohio health": "Doug Leininger",
+    "trihealth": "Doug Leininger",
+    "uc health": "Doug Leininger",
+    "christ hospital": "Doug Leininger",
+    "cincinnati children": "Doug Leininger",
+    "erie insurance": "Doug Leininger",
+    "medline": "Doug Leininger",
+    "great american insurance": "Doug Leininger",
+    "nationwide": "Doug Leininger",
+    "medpace": "Doug Leininger",
+    "caring communities": "Doug Leininger",
+    "farmers insurance": "Doug Leininger",
+    "sift md": "Doug Leininger",
+    "optum": "Doug Leininger",
+    "uw health": "Doug Leininger",
+
+    # ── Scott Patterson ──────────────────────────────────────────
+    "keybank": "Scott Patterson",
+    "new york life": "Scott Patterson",
+    "nyl": "Scott Patterson",
+    "allstate": "Scott Patterson",
+    "m&t bank": "Scott Patterson",
+    "bmo": "Scott Patterson",
+    "vanguard": "Scott Patterson",
+    "guardian life": "Scott Patterson",
+    "hanover": "Scott Patterson",
+    "massmutual": "Scott Patterson",
+    "fhlb": "Scott Patterson",
+    "cincinnati financial": "Scott Patterson",
+    "first united bank": "Scott Patterson",
+    "first financial": "Scott Patterson",
+    "varsity healthcare": "Scott Patterson",
+    "associate bank": "Scott Patterson",
+    "farm credit": "Scott Patterson",
+    "delta community credit": "Scott Patterson",
+    "percheron": "Scott Patterson",
+
+    # ── Palmer Karsh ────────────────────────────────────────────
+    "abercrombie": "Palmer Karsh",
+    "pilot ": "Palmer Karsh",
+    "southern glazer": "Palmer Karsh",
+    "kroger": "Palmer Karsh",
+    "84.51": "Palmer Karsh",
+    "michelin": "Palmer Karsh",
+    "energizer": "Palmer Karsh",
+    "kohl": "Palmer Karsh",
+    "procter & gamble": "Palmer Karsh",
+    "p&g": "Palmer Karsh",
+    "wendy": "Palmer Karsh",
+    "arby": "Palmer Karsh",
+    "bob evans": "Palmer Karsh",
+    "drt ": "Palmer Karsh",
+    "black book": "Palmer Karsh",
+    "worthington": "Palmer Karsh",
+    "avalonbay": "Palmer Karsh",
+    "lennar": "Palmer Karsh",
+    "thrivent": "Palmer Karsh",
+    "fifth third": "Palmer Karsh",
+    "paycor": "Palmer Karsh",
+    "gaig": "Palmer Karsh",
+    "penn foster": "Palmer Karsh",
+
+    # ── Paul Ferri ───────────────────────────────────────────────
+    "disney": "Paul Ferri",
+    "ulta": "Paul Ferri",
+    "belkin": "Paul Ferri",
+    "intel": "Paul Ferri",
+    "match group": "Paul Ferri",
+    "samsung": "Paul Ferri",
+    "tile ": "Paul Ferri",
+    "turing labs": "Paul Ferri",
+    "grubhub": "Paul Ferri",
+    "logitech": "Paul Ferri",
+    "getty images": "Paul Ferri",
+    "uptake": "Paul Ferri",
+    "sonos": "Paul Ferri",
+    "rakuten": "Paul Ferri",
+    "id.me": "Paul Ferri",
+    "intuit": "Paul Ferri",
+    "meta": "Paul Ferri",
+    "facebook": "Paul Ferri",
+    "fetch rewards": "Paul Ferri",
+    "apple": "Paul Ferri",
+    "vivid seats": "Paul Ferri",
 }
 
-def assign_owner(company: str | None) -> str | None:
-    """
-    Return the account-manager name for this company or None if unknown.
-    """
-    if not company or not isinstance(company, str):
-        return None
-    key = company.lower().strip()
-    return ACCOUNT_OWNER.get(key)
+# ------------------------------------------------------------------
+def get_owner(company: str) -> str:
+    """Return AE name or ''."""
+    c = (company or "").lower()
+    for key, owner in OWNER_LOOKUP.items():
+        if key in c:
+            return owner
+    return ""
 
 
-# ─── Environment / configuration ───────────────────────────────────────────────
-AIRTABLE_TOKEN       = os.getenv("AIRTABLE_TOKEN")
-AIRTABLE_BASE_ID     = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME  = os.getenv("AIRTABLE_TABLE_NAME")
-
-AWS_ACCESS_KEY       = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_KEY       = os.getenv("AWS_SECRET_ACCESS_KEY")
-AWS_BUCKET           = os.getenv("AWS_BUCKET_NAME")
-AWS_REGION           = os.getenv("AWS_REGION", "us-east-1")          # default
-
-S3_PREFIX            = os.getenv("S3_PREFIX", "")  # e.g. "incoming/" (can be "")
-FILE_EXT             = ".csv"                      # we store CSV files in S3
-
-assert all([AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME,
-            AWS_ACCESS_KEY,  AWS_SECRET_KEY,  AWS_BUCKET]), \
-       "🔑 One or more required environment variables are missing!"
-
-# ─── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level   = logging.INFO,
-    format  = "%(asctime)s [%(levelname)s] %(message)s",
-    datefmt = "%Y-%m-%d %H:%M:%S",
-)
-
-# ─── External clients ──────────────────────────────────────────────────────────
-client = OpenAI()
-table  = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
-s3     = boto3.client(
-            "s3",
-            region_name          = AWS_REGION,
-            aws_access_key_id    = AWS_ACCESS_KEY,
-            aws_secret_access_key= AWS_SECRET_KEY,
-        )
-
-# ─── Helpers ───────────────────────────────────────────────────────────────────
-def fetch_latest_from_s3() -> str | None:
-    """
-    Download newest *.csv from S3 and return the local filename (or None).
-    """
-    try:
-        resp     = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX)
-        objects  = resp.get("Contents", [])
-        csv_objs = [o for o in objects if o["Key"].endswith(FILE_EXT)]
-        if not csv_objs:
-            logging.error("S3: no %s files found in bucket %s/%s",
-                          FILE_EXT, AWS_BUCKET, S3_PREFIX)
-            return None
-
-        latest = max(csv_objs, key=lambda o: o["LastModified"])
-        key    = latest["Key"]
-        local  = os.path.basename(key)
-        logging.info("📥 Downloading s3://%s/%s", AWS_BUCKET, key)
-        s3.download_file(AWS_BUCKET, key, local)
-        return local
-
-    except Exception as exc:
-        logging.error("S3 download error: %s", exc)
-        return None
-
-
+# ──────────────────────────────────────────────────────────────────────────────
+#            2.  BUSINESS RULES
+# ──────────────────────────────────────────────────────────────────────────────
 def is_allowed(row: dict) -> bool:
     """
-    Quick filter – only keep rows whose function/title mention our allowed themes.
+    True if this job belongs to one of our target functions.
+    Handles NaNs / non-string values safely.
     """
     ALLOWED = {
         "machine learning", "data science", "data analytics", "analytics",
         "visualization", "data governance", "engineering", "product management",
     }
-
-    raw = row.get("job_function") or row.get("job_title") or ""
-    text = str(raw).lower()                 # <— always a string now
+    raw  = row.get("job_function") or row.get("job_title") or ""
+    text = str(raw).lower()
     return any(k in text for k in ALLOWED)
 
 
-def score_job(job: dict) -> tuple[int, str]:
-    """
-    Ask GPT-4 to rate the job. Returns (score, full-text reason).
-    """
-    prompt = f"""
-You are an AI job screener. Rate this job on a scale from 1-10 based on:
-• Role relevance to "Data Science"
-• Seniority (prefer senior roles)
-• Remote work option
-• Salary (prefer $140k+)
-
-Job Title: {job.get('job_title')}
-Company: {job.get('company_name')}
-Summary: {job.get('job_summary')}
-Location: {job.get('job_location')}
-Salary: {job.get('base_salary')}
-Description: {job.get('job_description')}
-
-Respond in this exact format:
-Score: X/10
-Reason: [short reason]
-"""
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",            # cheaper/faster; switch if you like
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.2,
-        )
-        content    = resp.choices[0].message.content.strip()
-        score_line = next((ln for ln in content.splitlines() if "Score" in ln), "Score: 0/10")
-        score      = int(score_line.split(":")[1].split("/")[0].strip())
-        return score, content
-
-    except Exception as exc:
-        logging.error("OpenAI error: %s", exc)
-        return 0, f"Score: 0/10\nReason: OpenAI error: {exc}"
-
-
-def sanitize(value):
-    """Convert NaNs / None → None, truncate long strings for Airtable limits."""
-    if pd.isna(value):
-        return None
-    if isinstance(value, float) and value != value:  # NaN check
-        return None
-    if isinstance(value, str) and len(value) > 10000:
-        return value[:10000]
-    return value
-
-
-def push_to_airtable(job: dict, score: int, reason: str) -> None:
-    """
-    Send a single record to Airtable (adds blank Account Manager when unknown).
-    """
-    try:
-        company = sanitize(job.get("company_name"))
-        fields  = {
-            "job_title"        : sanitize(job.get("job_title")),
-            "company_name"     : company,
-            "job_location"     : sanitize(job.get("job_location")),
-            "job_summary"      : sanitize(job.get("job_summary")),
-            "job_function"     : sanitize(job.get("job_function")),
-            "job_industries"   : sanitize(job.get("job_industries")),
-            "job_base_pay_range": sanitize(job.get("job_base_pay_range")),
-            "url"              : sanitize(job.get("url")),
-            "job_posted_time"  : sanitize(job.get("job_posted_time")),
-            "job_num_applicants": sanitize(job.get("job_num_applicants")),
-            "Score"            : score,
-            "Reason"           : reason,
-            "Account Manager"  : assign_owner(company),   # ← new field
-        }
-
-        poster = sanitize(job.get("job_poster"))
-        if poster is not None:
-            fields["job_poster"] = poster
-
-        table.create(fields)
-        logging.info("✅ Airtable: added %s @ %s [owner: %s]",
-                     fields["job_title"], company, fields["Account Manager"] or "—")
-
-    except Exception as exc:
-        logging.error("❌ Airtable error: %s", exc)
-
-
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+#            3.  MAIN
+# ──────────────────────────────────────────────────────────────────────────────
 def main() -> None:
-    logging.info("🚀 Starting job screener...")
-    path = fetch_latest_from_s3()
-    if not path:
-        logging.error("🚨 No file retrieved from S3.")
-        return
+    # ── locate newest BrightData CSV
+    csv_path = max(SOURCE_FOLDER.glob("bd_*.csv"), key=lambda p: p.stat().st_mtime)
+    log.info("📥 Processing %s", csv_path.name)
 
-    try:
-        df = pd.read_csv(path, keep_default_na=True)
-    except Exception as exc:
-        logging.error("CSV read error: %s", exc)
-        return
+    airtable = Table(AIRTABLE_TOKEN, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
 
-    # basic cleaning
-    df = df.dropna(how="all")
-    df = df.dropna(subset=["job_title", "company_name"])
+    with csv_path.open(newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        added = 0
+        for row in reader:
+            if not is_allowed(row):
+                continue
 
-    logging.info("📊 Loaded %d rows", len(df))
+            company = (row.get("company_name") or row.get("company") or "").strip()
+            owner   = get_owner(company)
 
-    for job in df.to_dict("records"):
-        if not is_allowed(job):
-            logging.info("🛈 Skipped (out-of-scope): %s – %s",
-                         job.get("job_title"), job.get("company_name"))
-            continue
+            record = {
+                "Job Title"   : row.get("job_title"),
+                "Company"     : company,
+                "Location"    : row.get("job_location"),
+                "Posted"      : row.get("job_posted_date"),
+                "Link"        : row.get("apply_link") or row.get("url"),
+                "Owner"       : owner,
+            }
 
-        score, reason = score_job(job)
-        logging.info("🧠 GPT scored %d/10", score)
-        push_to_airtable(job, score, reason)
-        time.sleep(1)   # Airtable rate-limit kindness
+            airtable.create(record)
+            log.info("✅ Airtable: added %s @ %s [owner: %s]",
+                     record["Job Title"], company, owner or "-")
+            added += 1
+
+    log.info("🎉 Done – %s new records", added)
 
 
 if __name__ == "__main__":
+    log.info("🚀 Starting job screener…")
     main()
