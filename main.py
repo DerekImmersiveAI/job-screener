@@ -122,8 +122,10 @@ def is_allowed(row: dict) -> bool:
         "machine learning", "data science", "data analytics", "analytics",
         "visualization", "data governance", "engineering", "product management",
     }
-    text = (row.get("job_function") or row.get("job_title") or "").lower()
-    return any(keyword in text for keyword in ALLOWED)
+
+    raw = row.get("job_function") or row.get("job_title") or ""
+    text = str(raw).lower()                 # <— always a string now
+    return any(k in text for k in ALLOWED)
 
 
 def score_job(job: dict) -> tuple[int, str]:
