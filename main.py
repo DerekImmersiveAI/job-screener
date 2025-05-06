@@ -251,28 +251,60 @@ def is_allowed(row: dict) -> bool:
     return any(k in text for k in ALLOWED)
 
 
+# ─── Target disciplines & helpers ──────────────────────────────────────────────
+CATEGORIES = {
+    "machine learning",
+    "data science",
+    "data analytics",
+    "visualization",
+    "data governance",
+    "engineering",
+    "product management",
+}
+
+def is_allowed(row: dict) -> bool:
+    """
+    Return True if the job *mentions* one of our target disciplines
+    in either job_function or job_title (case-insensitive).
+    """
+    text = " ".join(
+        str(row.get(col, "")).lower()
+        for col in ("job_function", "job_title")
+    )
+    return any(cat in text for cat in CATEGORIES)
+
+# ─── Smarter scoring: recency ➊  +  relevance ➋ ───────────────────────────────
 def score_job(job: dict) -> tuple[int, str]:
     """
-    Ask GPT-4 to rate the job. Returns (score, full-text reason).
+    100-point score = ➊ recency (0-50) + ➋ relevance (0-50)
+
+    • Recency → 50 if posted today, 0 if ≥30 days old (linear in-between)
+    • Relevance → proportion of target keywords present in title / function
     """
-    prompt = f"""
-You are an AI job screener. Rate this job on a scale from 1-10 based on:
-• Role relevance to "Data Science"
-• Seniority (prefer senior roles)
-• Remote work option
-• Salary (prefer $140k+)
+    # ➊ RECENCY
+    raw_time = str(job.get("job_posted_time", "")).split("T")[0]  # cope w/ ISO+
+    try:
+        days = (datetime.utcnow() - datetime.fromisoformat(raw_time)).days
+    except Exception:
+        days = 30                                                      # unknown ⇒ worst
+    recency_score = max(0, 50 - int((days / 30) * 50))                 # clamp 0-50
 
-Job Title: {job.get('job_title')}
-Company: {job.get('company_name')}
-Summary: {job.get('job_summary')}
-Location: {job.get('job_location')}
-Salary: {job.get('base_salary')}
-Description: {job.get('job_description')}
+    # ➋ RELEVANCE
+    text = " ".join(
+        str(job.get(col, "")).lower()
+        for col in ("job_function", "job_title")
+    )
+    hits      = [cat for cat in CATEGORIES if cat in text]
+    relevance_score = int(50 * len(hits) / len(CATEGORIES))            # 0-50
 
-Respond in this exact format:
-Score: X/10
-Reason: [short reason]
-"""
+    # ─ combined
+    total = recency_score + relevance_score                            # 0-100
+    reason = (
+        f"Recency: {recency_score}/50 (posted {days} d ago)  |  "
+        f"Relevance: {relevance_score}/50 (keywords: {', '.join(hits) or 'none'})"
+    )
+    return total, reason
+
     try:
         resp = client.chat.completions.create(
             model="gpt-4o-mini",            # cheaper/faster; switch if you like
