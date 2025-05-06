@@ -143,16 +143,6 @@ def get_owner(company: str) -> str:
     return ""
 
     # Example for “Unassigned” bucket – simply omit from dict; script will leave blank
-}
-
-def assign_owner(company: str | None) -> str | None:
-    """
-    Return the account-manager name for this company or None if unknown.
-    """
-    if not company or not isinstance(company, str):
-        return None
-    key = company.lower().strip()
-    return ACCOUNT_OWNER.get(key)
 
 
 # ─── Environment / configuration ───────────────────────────────────────────────
