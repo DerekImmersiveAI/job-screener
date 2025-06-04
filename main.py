@@ -17,7 +17,16 @@ from openai import OpenAI
 #   • minimal punctuation / spaces trimmed
 # Feel free to add more aliases later – just keep them lower-case.
 
-OWNER_LOOKUP: dict[str, str] = {
+# 1) Raw pairs (unchanged) – note the outer brackets are [] not {}
+OWNER_PAIRS: list[tuple[str, str]] = [
+    ("DIRECTV", "Chris Vaughan"),
+    ("The Walt Disney Company/ESPN", "Chris Vaughan"),
+    ...
+]
+
+# 2) Derived lookup dict  ✅
+OWNER_LOOKUP = {account.lower(): owner for account, owner in OWNER_PAIRS}
+
      # — Chris Vaughan —
     ("DIRECTV", "Chris Vaughan"),
     ("The Walt Disney Company/ESPN", "Chris Vaughan"),
