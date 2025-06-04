@@ -2,7 +2,6 @@
 # ────────────────────────────────────────────────────────────────────────────────
 # main.py – download latest Bright Data CSV from S3, score each job with GPT-4,
 #           push in-scope jobs to Airtable, and tag with the correct account owner.
-#           Only jobs posted in the last **7 days** are uploaded to Airtable.
 # ────────────────────────────────────────────────────────────────────────────────
 import os, time, logging
 from datetime import datetime, timedelta, timezone
