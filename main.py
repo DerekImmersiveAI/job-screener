@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 # ────────────────────────────────────────────────────────────────────────────────
 # main.py – download latest Bright Data CSV from S3, score each job with GPT-4,
-#           push in-scope jobs to Airtable AND tag with the correct account owner
+#           push in-scope jobs to Airtable, and tag with the correct account owner.
 #           Only jobs posted in the last **7 days** are uploaded to Airtable.
 # ────────────────────────────────────────────────────────────────────────────────
 import os, time, logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import boto3, pandas as pd
 from pyairtable import Table
 from openai import OpenAI
 
-# ─── Account-owner lookup ──────────────────────────────────────────────────────
-# We normalise both the dictionary keys **and** the incoming company names:
-#   • all lower-case
-#   • no accents / fancy apostrophes
-#   • minimal punctuation / spaces trimmed
-# Feel free to add more aliases later – just keep them lower-case.
+# ─── Account-owner lookup (complete Top10/Next10 list) ─────────────────────────
+# Keep the readable list of (account, owner) tuples below; the dictionary used
+# at runtime is generated from it so you only have one place to edit.
 
-# 1) Raw pairs (unchanged) – note the outer brackets are [] not {}
 OWNER_PAIRS: list[tuple[str, str]] = [
-    ("DIRECTV", "Chris Vaughan"),
-    ("The Walt Disney Company/ESPN", "Chris Vaughan"),
-    ...
-]
-
-# 2) Derived lookup dict  ✅
-OWNER_LOOKUP = {account.lower(): owner for account, owner in OWNER_PAIRS}
-
-     # — Chris Vaughan —
+    # — Chris Vaughan —
     ("DIRECTV", "Chris Vaughan"),
     ("The Walt Disney Company/ESPN", "Chris Vaughan"),
     ("SiriusXM", "Chris Vaughan"),
@@ -236,20 +224,11 @@ OWNER_LOOKUP = {account.lower(): owner for account, owner in OWNER_PAIRS}
     ("Credit One Bank", "Jason Kratsa"),
     ("American Credit Acceptance", "Jason Kratsa"),
     ("PenFed", "Jason Kratsa"),
-}
+]
 
-# ---------------------------------------------------------------------------
-def assign_owner(company: str | None) -> str | None:
-    """
-    Return the Account Executive’s name for a company, or None when unknown.
-    """
-    if not company:
-        return None
-    c = company.casefold()
-    for alias, owner in OWNER_LOOKUP.items():
-        if alias in c:
-            return owner
-    return None
+# → Fast lookup dict  (keys lower-cased for tolerant matching)
+OWNER_LOOKUP = {acct.lower(): owner for acct, owner in OWNER_PAIRS}
+
 
 
 
