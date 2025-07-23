@@ -340,8 +340,6 @@ def main() -> None:
                 "job_num_applicants": sanitize(job.get("job_num_applicants")),
                 "Account Manager": sanitize(assign_owner(company)),
 }
-
-
             poster = job.get("job_poster")
             if poster:
                 fields["job_poster"] = poster
