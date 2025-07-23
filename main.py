@@ -257,7 +257,6 @@ def is_allowed(row: dict) -> bool:
     Return True if the job is in our target disciplines (title, function, or industry)
     AND is director level or higher.
     """
-    # Merge fields to improve hit rate for discipline match
     discipline_text = " ".join(
         str(row.get(col, "")).lower()
         for col in ("job_function", "job_title", "job_industries")
@@ -266,9 +265,9 @@ def is_allowed(row: dict) -> bool:
     if not any(cat in discipline_text for cat in CATEGORIES):
         return False
 
-    # Check for seniority keywords
     title = str(row.get("job_title", "")).lower()
     return any(keyword in title for keyword in DIRECTOR_KEYWORDS)
+
 
 
 
