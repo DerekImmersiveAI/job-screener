@@ -318,23 +318,14 @@ def main() -> None:
 
     for job in df.to_dict("records"):
         if not is_allowed(job):
-            logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s", job.get("job_title"), job.get("company_name"))
+            logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s",
+                         job.get("job_title"), job.get("company_name"))
             continue
 
-def job_already_exists(url: str | None) -> bool:
-    """
-    Check if a job with the given URL already exists in Airtable.
-    """
-    if not url:
-        return False
-
-    try:
-        records = table.all(formula=f"{{url}} = '{url}'")
-        return len(records) > 0
-    except Exception as e:
-        logging.warning(f"⚠️ Airtable duplicate check failed for {url}: {e}")
-        return False
-
+        url = job.get("url")
+        if job_already_exists(url):
+            logging.info("🔁 Skipped duplicate: %s", url)
+            continue
 
         logging.info("✅ Allowed: %s – %s", job.get("job_title"), job.get("company_name"))
         try:
@@ -352,14 +343,16 @@ def job_already_exists(url: str | None) -> bool:
                 "job_num_applicants": sanitize(job.get("job_num_applicants")),
                 "Account Manager": sanitize(assign_owner(company)),
             }
+
             poster = sanitize(job.get("job_poster"))
             if poster:
                 fields["job_poster"] = poster
+
             table.create(fields)
             logging.info("✅ Airtable: added %s @ %s", fields["job_title"], company)
+
         except Exception as exc:
             logging.error("❌ Airtable error: %s", exc)
+
         time.sleep(1)
 
-if __name__ == "__main__":
-    main()
