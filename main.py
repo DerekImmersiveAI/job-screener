@@ -339,3 +339,7 @@ def main() -> None:
             logging.error("❌ Airtable error: %s", exc)
 
         time.sleep(1)
+        
+        if __name__ == "__main__":
+    main()
+
