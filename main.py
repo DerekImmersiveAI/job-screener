@@ -254,17 +254,22 @@ def fetch_latest_from_s3() -> str | None:
 
 def is_allowed(row: dict) -> bool:
     """
-    True if this job belongs to one of our target functions.
-    Handles NaNs / non-string values safely.
+    Return True if the job is in our target disciplines (title, function, or industry)
+    AND is director level or higher.
     """
-    ALLOWED = {
-        "machine learning", "data science", "data analytics", "analytics",
-        "visualization", "data governance", "engineering", "product management",
-    }
+    # Merge fields to improve hit rate for discipline match
+    discipline_text = " ".join(
+        str(row.get(col, "")).lower()
+        for col in ("job_function", "job_title", "job_industries")
+    )
 
-    raw = row.get("job_function") or row.get("job_title") or ""
-    text = str(raw).lower()                 # <— always a string now
-    return any(k in text for k in ALLOWED)
+    if not any(cat in discipline_text for cat in CATEGORIES):
+        return False
+
+    # Check for seniority keywords
+    title = str(row.get("job_title", "")).lower()
+    return any(keyword in title for keyword in DIRECTOR_KEYWORDS)
+
 
 
 # ─── Target disciplines & helpers ──────────────────────────────────────────────
