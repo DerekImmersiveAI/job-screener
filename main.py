@@ -326,9 +326,8 @@ def main() -> None:
                          job.get("job_title"), job.get("company_name"))
             continue
 
-        score, reason = score_job(job)
-        logging.info("\U0001F9E0 GPT scored %d/10", score)
-        push_to_airtable(job, score, reason)
+                push_to_airtable(job, None, "Scoring disabled")
+
         time.sleep(1)   # Airtable rate-limit kindness
 
 
