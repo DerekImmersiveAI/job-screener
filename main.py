@@ -252,24 +252,6 @@ def fetch_latest_from_s3() -> str | None:
         return None
 
 
-def is_allowed(row: dict) -> bool:
-    """
-    Return True if the job is in our target disciplines (title, function, or industry)
-    AND is director level or higher.
-    """
-    discipline_text = " ".join(
-        str(row.get(col, "")).lower()
-        for col in ("job_function", "job_title", "job_industries")
-    )
-
-    if not any(cat in discipline_text for cat in CATEGORIES):
-        return False
-
-    title = str(row.get("job_title", "")).lower()
-    return any(keyword in title for keyword in DIRECTOR_KEYWORDS)
-
-
-
 
 # ─── Target disciplines & helpers ──────────────────────────────────────────────
 CATEGORIES = {
@@ -289,20 +271,20 @@ DIRECTOR_KEYWORDS = [
 
 def is_allowed(row: dict) -> bool:
     """
-    Return True if the job is in our target disciplines AND is director level or higher.
+    Return True if the job is in our target disciplines (title, function, or industry)
+    AND is director level or higher.
     """
-    # Check for discipline match
     discipline_text = " ".join(
-        str(row.get(col, "")).lower() for col in ("job_function", "job_title")
+        str(row.get(col, "")).lower()
+        for col in ("job_function", "job_title", "job_industries")
     )
+
     if not any(cat in discipline_text for cat in CATEGORIES):
         return False
 
-    # Check for seniority keywords
     title = str(row.get("job_title", "")).lower()
     return any(keyword in title for keyword in DIRECTOR_KEYWORDS)
 
-# (the rest of your script remains unchanged below...)
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
