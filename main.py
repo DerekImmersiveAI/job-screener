@@ -306,11 +306,42 @@ def main() -> None:
 
     logging.info("\U0001F4CA Loaded %d rows", len(df))
 
-    for job in df.to_dict("records"):
+       for job in df.to_dict("records"):
         if not is_allowed(job):
-            logging.info("\U0001F6C8 Skipped (not director+ or out-of-scope): %s – %s",
+            logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s",
                          job.get("job_title"), job.get("company_name"))
-        time.sleep(1)   # Airtable rate-limit kindness
+            continue
+
+        logging.info("✅ Allowed: %s – %s", job.get("job_title"), job.get("company_name"))
+
+        # Push to Airtable
+        try:
+            company = job.get("company_name")
+            fields = {
+                "job_title": job.get("job_title"),
+                "company_name": company,
+                "job_location": job.get("job_location"),
+                "job_summary": job.get("job_summary"),
+                "job_function": job.get("job_function"),
+                "job_industries": job.get("job_industries"),
+                "job_base_pay_range": job.get("job_base_pay_range"),
+                "url": job.get("url"),
+                "job_posted_time": job.get("job_posted_time"),
+                "job_num_applicants": job.get("job_num_applicants"),
+                "Account Manager": assign_owner(company),
+            }
+
+            poster = job.get("job_poster")
+            if poster:
+                fields["job_poster"] = poster
+
+            table.create(fields)
+            logging.info("✅ Airtable: added %s @ %s", fields["job_title"], company)
+        except Exception as exc:
+            logging.error("❌ Airtable error: %s", exc)
+
+        time.sleep(1)
+
 
 
 if __name__ == "__main__":
