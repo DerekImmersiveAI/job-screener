@@ -306,8 +306,8 @@ def main() -> None:
 
     logging.info("\U0001F4CA Loaded %d rows", len(df))
 
-       for job in df.to_dict("records"):
-    if not is_allowed(job):
+    for job in df.to_dict("records"):
+        if not is_allowed(job):
         logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s",
                      job.get("job_title"), job.get("company_name"))
         continue
