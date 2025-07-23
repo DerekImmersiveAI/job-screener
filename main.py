@@ -321,7 +321,7 @@ def main() -> None:
             logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s", job.get("job_title"), job.get("company_name"))
             continue
 
-    def job_already_exists(url: str | None) -> bool:
+def job_already_exists(url: str | None) -> bool:
     """
     Check if a job with the given URL already exists in Airtable.
     """
