@@ -327,7 +327,7 @@ def main() -> None:
 
         try:
             company = job.get("company_name")
-            ffields = {
+            fields = {
                 "job_title": sanitize(job.get("job_title")),
                 "company_name": sanitize(company),
                 "job_location": sanitize(job.get("job_location")),
