@@ -278,116 +278,34 @@ CATEGORIES = {
     "product management",
 }
 
+DIRECTOR_KEYWORDS = [
+    "director", "sr director", "senior director", "executive director",
+    "vp", "vice president", "svp", "evp", "chief", "head of", "cto", "cio", "ceo"
+]
+
 def is_allowed(row: dict) -> bool:
     """
-    Return True if the job *mentions* one of our target disciplines
-    in either job_function or job_title (case-insensitive).
+    Return True if the job is in our target disciplines AND is director level or higher.
     """
-    text = " ".join(
-        str(row.get(col, "")).lower()
-        for col in ("job_function", "job_title")
+    # Check for discipline match
+    discipline_text = " ".join(
+        str(row.get(col, "")).lower() for col in ("job_function", "job_title")
     )
-    return any(cat in text for cat in CATEGORIES)
+    if not any(cat in discipline_text for cat in CATEGORIES):
+        return False
 
-# ─── Smarter scoring: recency ➊  +  relevance ➋ ───────────────────────────────
-def score_job(job: dict) -> tuple[int, str]:
-    """
-    100-point score = ➊ recency (0-50) + ➋ relevance (0-50)
+    # Check for seniority keywords
+    title = str(row.get("job_title", "")).lower()
+    return any(keyword in title for keyword in DIRECTOR_KEYWORDS)
 
-    • Recency → 50 if posted today, 0 if ≥30 days old (linear in-between)
-    • Relevance → proportion of target keywords present in title / function
-    """
-    # ➊ RECENCY
-    raw_time = str(job.get("job_posted_time", "")).split("T")[0]  # cope w/ ISO+
-    try:
-        days = (datetime.utcnow() - datetime.fromisoformat(raw_time)).days
-    except Exception:
-        days = 30                                                      # unknown ⇒ worst
-    recency_score = max(0, 50 - int((days / 30) * 50))                 # clamp 0-50
-
-    # ➋ RELEVANCE
-    text = " ".join(
-        str(job.get(col, "")).lower()
-        for col in ("job_function", "job_title")
-    )
-    hits      = [cat for cat in CATEGORIES if cat in text]
-    relevance_score = int(50 * len(hits) / len(CATEGORIES))            # 0-50
-
-    # ─ combined
-    total = recency_score + relevance_score                            # 0-100
-    reason = (
-        f"Recency: {recency_score}/50 (posted {days} d ago)  |  "
-        f"Relevance: {relevance_score}/50 (keywords: {', '.join(hits) or 'none'})"
-    )
-    return total, reason
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",            # cheaper/faster; switch if you like
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.2,
-        )
-        content    = resp.choices[0].message.content.strip()
-        score_line = next((ln for ln in content.splitlines() if "Score" in ln), "Score: 0/10")
-        score      = int(score_line.split(":")[1].split("/")[0].strip())
-        return score, content
-
-    except Exception as exc:
-        logging.error("OpenAI error: %s", exc)
-        return 0, f"Score: 0/10\nReason: OpenAI error: {exc}"
-
-
-def sanitize(value):
-    """Convert NaNs / None → None, truncate long strings for Airtable limits."""
-    if pd.isna(value):
-        return None
-    if isinstance(value, float) and value != value:  # NaN check
-        return None
-    if isinstance(value, str) and len(value) > 10000:
-        return value[:10000]
-    return value
-
-
-def push_to_airtable(job: dict, score: int, reason: str) -> None:
-    """
-    Send a single record to Airtable (adds blank Account Manager when unknown).
-    """
-    try:
-        company = sanitize(job.get("company_name"))
-        fields  = {
-            "job_title"        : sanitize(job.get("job_title")),
-            "company_name"     : company,
-            "job_location"     : sanitize(job.get("job_location")),
-            "job_summary"      : sanitize(job.get("job_summary")),
-            "job_function"     : sanitize(job.get("job_function")),
-            "job_industries"   : sanitize(job.get("job_industries")),
-            "job_base_pay_range": sanitize(job.get("job_base_pay_range")),
-            "url"              : sanitize(job.get("url")),
-            "job_posted_time"  : sanitize(job.get("job_posted_time")),
-            "job_num_applicants": sanitize(job.get("job_num_applicants")),
-            "Score"            : score,
-            "Reason"           : reason,
-            "Account Manager"  : assign_owner(company),   # ← new field
-        }
-
-        poster = sanitize(job.get("job_poster"))
-        if poster is not None:
-            fields["job_poster"] = poster
-
-        table.create(fields)
-        logging.info("✅ Airtable: added %s @ %s [owner: %s]",
-                     fields["job_title"], company, fields["Account Manager"] or "—")
-
-    except Exception as exc:
-        logging.error("❌ Airtable error: %s", exc)
-
+# (the rest of your script remains unchanged below...)
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    logging.info("🚀 Starting job screener...")
+    logging.info("\U0001F680 Starting job screener...")
     path = fetch_latest_from_s3()
     if not path:
-        logging.error("🚨 No file retrieved from S3.")
+        logging.error("\uD83D\uDEA8 No file retrieved from S3.")
         return
 
     try:
@@ -400,16 +318,16 @@ def main() -> None:
     df = df.dropna(how="all")
     df = df.dropna(subset=["job_title", "company_name"])
 
-    logging.info("📊 Loaded %d rows", len(df))
+    logging.info("\U0001F4CA Loaded %d rows", len(df))
 
     for job in df.to_dict("records"):
         if not is_allowed(job):
-            logging.info("🛈 Skipped (out-of-scope): %s – %s",
+            logging.info("\U0001F6C8 Skipped (not director+ or out-of-scope): %s – %s",
                          job.get("job_title"), job.get("company_name"))
             continue
 
         score, reason = score_job(job)
-        logging.info("🧠 GPT scored %d/10", score)
+        logging.info("\U0001F9E0 GPT scored %d/10", score)
         push_to_airtable(job, score, reason)
         time.sleep(1)   # Airtable rate-limit kindness
 
