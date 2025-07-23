@@ -324,10 +324,6 @@ def main() -> None:
         if not is_allowed(job):
             logging.info("\U0001F6C8 Skipped (not director+ or out-of-scope): %s – %s",
                          job.get("job_title"), job.get("company_name"))
-            continue
-
-                push_to_airtable(job, None, "Scoring disabled")
-
         time.sleep(1)   # Airtable rate-limit kindness
 
 
