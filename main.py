@@ -190,6 +190,18 @@ def assign_owner(company: str | None) -> str | None:
     return None  # no match
 
 
+def sanitize(value):
+    """Convert NaNs, None, or out-of-range floats to None. Truncate long strings."""
+    if pd.isna(value) or value in [float("inf"), float("-inf")]:
+        return None
+    if isinstance(value, float) and (value != value):  # catches NaN
+        return None
+    if isinstance(value, str) and len(value) > 10000:
+        return value[:10000]
+    return value
+
+
+
 
 
 # ─── Environment / configuration ───────────────────────────────────────────────
@@ -315,19 +327,20 @@ def main() -> None:
 
         try:
             company = job.get("company_name")
-            fields = {
-                "job_title": job.get("job_title"),
-                "company_name": company,
-                "job_location": job.get("job_location"),
-                "job_summary": job.get("job_summary"),
-                "job_function": job.get("job_function"),
-                "job_industries": job.get("job_industries"),
-                "job_base_pay_range": job.get("job_base_pay_range"),
-                "url": job.get("url"),
-                "job_posted_time": job.get("job_posted_time"),
-                "job_num_applicants": job.get("job_num_applicants"),
-                "Account Manager": assign_owner(company),
-            }
+            ffields = {
+                "job_title": sanitize(job.get("job_title")),
+                "company_name": sanitize(company),
+                "job_location": sanitize(job.get("job_location")),
+                "job_summary": sanitize(job.get("job_summary")),
+                "job_function": sanitize(job.get("job_function")),
+                "job_industries": sanitize(job.get("job_industries")),
+                "job_base_pay_range": sanitize(job.get("job_base_pay_range")),
+                "url": sanitize(job.get("url")),
+                "job_posted_time": sanitize(job.get("job_posted_time")),
+                "job_num_applicants": sanitize(job.get("job_num_applicants")),
+                "Account Manager": sanitize(assign_owner(company)),
+}
+
 
             poster = job.get("job_poster")
             if poster:
