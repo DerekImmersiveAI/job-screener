@@ -288,10 +288,10 @@ def is_allowed(row: dict) -> bool:
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 def main() -> None:
-    logging.info("\U0001F680 Starting job screener...")
+    logging.info("🚀 Starting job screener...")
     path = fetch_latest_from_s3()
     if not path:
-        logging.error("\uD83D\uDEA8 No file retrieved from S3.")
+        logging.error("🚨 No file retrieved from S3.")
         return
 
     try:
@@ -300,11 +300,10 @@ def main() -> None:
         logging.error("CSV read error: %s", exc)
         return
 
-    # basic cleaning
     df = df.dropna(how="all")
     df = df.dropna(subset=["job_title", "company_name"])
 
-    logging.info("\U0001F4CA Loaded %d rows", len(df))
+    logging.info("📊 Loaded %d rows", len(df))
 
     for job in df.to_dict("records"):
         if not is_allowed(job):
@@ -340,8 +339,3 @@ def main() -> None:
             logging.error("❌ Airtable error: %s", exc)
 
         time.sleep(1)
-
-
-
-if __name__ == "__main__":
-    main()
