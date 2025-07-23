@@ -321,10 +321,20 @@ def main() -> None:
             logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s", job.get("job_title"), job.get("company_name"))
             continue
 
-        url = job.get("url")
-        if job_already_exists(url):
-            logging.info("🔁 Skipped duplicate: %s", url)
-            continue
+    def job_already_exists(url: str | None) -> bool:
+    """
+    Check if a job with the given URL already exists in Airtable.
+    """
+    if not url:
+        return False
+
+    try:
+        records = table.all(formula=f"{{url}} = '{url}'")
+        return len(records) > 0
+    except Exception as e:
+        logging.warning(f"⚠️ Airtable duplicate check failed for {url}: {e}")
+        return False
+
 
         logging.info("✅ Allowed: %s – %s", job.get("job_title"), job.get("company_name"))
         try:
