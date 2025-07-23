@@ -314,17 +314,19 @@ def main() -> None:
 
     df = df.dropna(how="all")
     df = df.dropna(subset=["job_title", "company_name"])
-
     logging.info("📊 Loaded %d rows", len(df))
 
     for job in df.to_dict("records"):
         if not is_allowed(job):
-            logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s",
-                         job.get("job_title"), job.get("company_name"))
+            logging.info("🛈 Skipped (not director+ or out-of-scope): %s – %s", job.get("job_title"), job.get("company_name"))
+            continue
+
+        url = job.get("url")
+        if job_already_exists(url):
+            logging.info("🔁 Skipped duplicate: %s", url)
             continue
 
         logging.info("✅ Allowed: %s – %s", job.get("job_title"), job.get("company_name"))
-
         try:
             company = job.get("company_name")
             fields = {
@@ -335,21 +337,19 @@ def main() -> None:
                 "job_function": sanitize(job.get("job_function")),
                 "job_industries": sanitize(job.get("job_industries")),
                 "job_base_pay_range": sanitize(job.get("job_base_pay_range")),
-                "url": sanitize(job.get("url")),
+                "url": sanitize(url),
                 "job_posted_time": sanitize(job.get("job_posted_time")),
                 "job_num_applicants": sanitize(job.get("job_num_applicants")),
                 "Account Manager": sanitize(assign_owner(company)),
-}
-            poster = job.get("job_poster")
+            }
+            poster = sanitize(job.get("job_poster"))
             if poster:
                 fields["job_poster"] = poster
-
             table.create(fields)
             logging.info("✅ Airtable: added %s @ %s", fields["job_title"], company)
         except Exception as exc:
             logging.error("❌ Airtable error: %s", exc)
+        time.sleep(1)
 
-        time.sleep(1)        
 if __name__ == "__main__":
     main()
-
