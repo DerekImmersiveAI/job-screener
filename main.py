@@ -257,10 +257,15 @@ def fetch_latest_from_s3() -> str | None:
         return None
 
 def job_already_exists(url: str | None) -> bool:
+    """
+    Check if a job with the given URL already exists in Airtable.
+    """
     if not url:
         return False
+
     try:
-        records = table.all(formula=f"{{url}} = '{url}'")
+        formula = f"FIND('{url}', {{url}})"
+        records = table.all(formula=formula)
         return len(records) > 0
     except Exception as e:
         logging.warning(f"⚠️ Airtable duplicate check failed for {url}: {e}")
