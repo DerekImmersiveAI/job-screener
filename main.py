@@ -238,72 +238,55 @@ s3     = boto3.client(
             aws_secret_access_key= AWS_SECRET_KEY,
         )
 
-# ─── Helpers ───────────────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────────────────────
 def fetch_latest_from_s3() -> str | None:
-    """
-    Download newest *.csv from S3 and return the local filename (or None).
-    """
     try:
-        resp     = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX)
-        objects  = resp.get("Contents", [])
-        csv_objs = [o for o in objects if o["Key"].endswith(FILE_EXT)]
+        resp = s3.list_objects_v2(Bucket=AWS_BUCKET, Prefix=S3_PREFIX)
+        csv_objs = [o for o in resp.get("Contents", []) if o["Key"].endswith(FILE_EXT)]
         if not csv_objs:
-            logging.error("S3: no %s files found in bucket %s/%s",
-                          FILE_EXT, AWS_BUCKET, S3_PREFIX)
+            logging.error("S3: no CSV files found")
             return None
-
         latest = max(csv_objs, key=lambda o: o["LastModified"])
-        key    = latest["Key"]
-        local  = os.path.basename(key)
-        logging.info("📥 Downloading s3://%s/%s", AWS_BUCKET, key)
+        key = latest["Key"]
+        local = os.path.basename(key)
         s3.download_file(AWS_BUCKET, key, local)
+        logging.info("📥 Downloaded %s", key)
         return local
-
     except Exception as exc:
-        logging.error("S3 download error: %s", exc)
+        logging.error("S3 error: %s", exc)
         return None
 
+def job_already_exists(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        records = table.all(formula=f"{{url}} = '{url}'")
+        return len(records) > 0
+    except Exception as e:
+        logging.warning(f"⚠️ Airtable duplicate check failed for {url}: {e}")
+        return False
 
-
-# ─── Target disciplines & helpers ──────────────────────────────────────────────
 CATEGORIES = {
-    "machine learning",
-    "data science",
-    "data analytics",
-    "visualization",
-    "data governance",
-    "engineering",
-    "product management",
+    "machine learning", "data science", "data analytics", "visualization",
+    "data governance", "engineering", "product management"
 }
-
 DIRECTOR_KEYWORDS = [
     "director", "sr director", "senior director", "executive director",
     "vp", "vice president", "svp", "evp", "chief", "head of", "cto", "cio", "ceo"
 ]
 
 def is_allowed(row: dict) -> bool:
-    """
-    Return True if the job is in our target disciplines (title, function, or industry)
-    AND is director level or higher.
-    """
-    discipline_text = " ".join(
-        str(row.get(col, "")).lower()
-        for col in ("job_function", "job_title", "job_industries")
-    )
-
+    discipline_text = " ".join(str(row.get(col, "")).lower() for col in ("job_function", "job_title", "job_industries"))
     if not any(cat in discipline_text for cat in CATEGORIES):
         return False
-
     title = str(row.get("job_title", "")).lower()
     return any(keyword in title for keyword in DIRECTOR_KEYWORDS)
 
-
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ─── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
     logging.info("🚀 Starting job screener...")
     path = fetch_latest_from_s3()
     if not path:
-        logging.error("🚨 No file retrieved from S3.")
         return
 
     try:
@@ -343,16 +326,14 @@ def main() -> None:
                 "job_num_applicants": sanitize(job.get("job_num_applicants")),
                 "Account Manager": sanitize(assign_owner(company)),
             }
-
             poster = sanitize(job.get("job_poster"))
             if poster:
                 fields["job_poster"] = poster
-
             table.create(fields)
             logging.info("✅ Airtable: added %s @ %s", fields["job_title"], company)
-
         except Exception as exc:
             logging.error("❌ Airtable error: %s", exc)
-
         time.sleep(1)
 
+if __name__ == "__main__":
+    main()
